@@ -1,0 +1,8 @@
+
+# local.properties 는 기기마다 다르다 - 커밋하지 않는다
+local.properties
+.gradle/
+build/
+.idea/
+*.iml
+.kotlin/
