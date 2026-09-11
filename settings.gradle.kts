@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 rootProject.name = "stepgrid-llm-kit"
 include(":resume")
 include(":device-tier")
+include(":engine")
