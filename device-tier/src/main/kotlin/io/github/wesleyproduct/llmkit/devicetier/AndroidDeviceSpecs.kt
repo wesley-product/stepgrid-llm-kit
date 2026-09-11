@@ -18,13 +18,15 @@ import android.os.Build
 public fun readDeviceSpecs(context: Context): DeviceSpecs {
     val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     val info = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+    val soc = socModel() ?: listOf(Build.HARDWARE, Build.BOARD).firstOrNull { !it.isNullOrBlank() }
 
     return DeviceSpecs(
         ramGb = info.totalMem / (1024.0 * 1024.0 * 1024.0),
         cores = Runtime.getRuntime().availableProcessors(),
         is64Bit = Build.SUPPORTED_64_BIT_ABIS.isNotEmpty(),
         lowRam = am.isLowRamDevice,
-        chip = classifyChip(socModel(), Build.HARDWARE, Build.BOARD),
+        chip = classifyChip(soc, Build.HARDWARE, Build.BOARD),
+        soc = soc.orEmpty(),
     )
 }
 

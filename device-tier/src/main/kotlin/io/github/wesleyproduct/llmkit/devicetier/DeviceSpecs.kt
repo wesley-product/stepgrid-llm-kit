@@ -18,6 +18,12 @@ public data class DeviceSpecs(
     /** 시스템이 스스로 저사양이라고 표시한 기기. */
     val lowRam: Boolean,
     val chip: ChipClass,
+    /**
+     * 알아본 칩 이름 그대로. 등급 판단에는 안 쓰이지만([tierOf] 는 [chip] 만 본다),
+     * 사용자에게 보여 주거나 신고에 붙일 때 필요하다 — 「모르는 칩」으로 떨어진 기기가
+     * 실제로 무엇이었는지는 이 값이 없으면 영영 알 수 없다.
+     */
+    val soc: String = "",
 )
 
 /**
