@@ -1,107 +1,166 @@
 # stepgrid-llm-kit
 
-안드로이드에서 온디바이스 LLM 을 붙일 때 **모델 자체와 상관없이 매번 다시 짜게 되는 것**들을
-떼어낸 것입니다. [StepGrid](https://play.google.com/store/apps/details?id=co.stepgrid) 에서
-쓰고 있는 코드이고, 그 앱이 이 저장소를 의존성으로 받아 씁니다.
+The parts you end up rewriting every time you put an on-device LLM into an Android app — and that
+have nothing to do with which model you run. Extracted from [StepGrid](https://play.google.com/store/apps/details?id=co.stepgrid),
+a shipping app that runs Gemma on-device with [LiteRT-LM](https://developers.google.com/edge/litert-lm);
+the app depends on this repository, so what is here is what is running.
 
-두 가지가 들어 있습니다. 둘 다 **틀렸을 때 조용히 비싼** 종류라 테스트를 두껍게 붙였습니다.
+[한국어 README](./README.ko.md)
 
-| 모듈 | 무엇 | 안드로이드 필요 |
+| Module | What it does | Needs Android |
 |---|---|---|
-| `resume` | 받다 만 큰 파일을 이어받아도 되는지 판단 | 아니오 (순수 코틀린) |
-| `device-tier` | 기기 사양으로 어느 크기의 모델을 줄지 결정 | 일부만 |
+| **`engine`** | One shared LiteRT-LM engine: GPU→CPU fallback ladder, retry-aware sampling, streamed and one-shot generation, and measurements of what actually happened | yes |
+| `device-tier` | Decide which model size a device can run, from real specs (chip class + RAM + cores) | reading specs only |
+| `resume` | Decide whether a half-finished download can be appended to, from what the server actually sent | no (pure JVM) |
 
-## 넣기
+Everything that *decides* is pure Kotlin and unit-tested on the JVM. Only the thin leaves that
+read Android or call the native runtime need a device.
+
+## Install
 
 ```kotlin
 dependencies {
-    implementation("io.github.wesley-product:resume:0.1.0")
+    implementation("io.github.wesley-product:engine:0.1.0")
     implementation("io.github.wesley-product:device-tier:0.1.0")
+    implementation("io.github.wesley-product:resume:0.1.0")
 }
 ```
 
-## `resume` — 이어받기 판단
+`engine` pulls LiteRT-LM in as an `api` dependency. minSdk 26. No consumer ProGuard rules are
+needed — the library uses no reflection or serialization, so R8 keeps exactly what you call.
 
-범위를 **요청하는 것과 받는 것은 다릅니다.** CDN 이 `Range` 를 무시할 수 있고 리다이렉트에서
-헤더가 빠질 수도 있는데, 그러면 응답은 첫 바이트부터 오는 평범한 200 입니다.
+## `engine`
 
-그걸 디스크에 있던 조각 뒤에 이어 붙이면 **크기는 맞고 내용은 깨진 파일**이 됩니다.
-GB 단위 모델이 로드까지 되고 나서 런타임 깊은 곳에서 실패하는데, 거기서 원인을 되짚어 올
-실마리가 없습니다.
+LiteRT-LM's `Backend.GPU()` does not fall back to CPU when GPU initialization fails on a device
+(missing OpenCL is the usual reason), and the context size you ask for may not fit that device's
+memory. The engine tries a ladder so that neither leaves you with no engine:
+
+```
+GPU + 4096 → CPU + 4096 → GPU + 2048 → CPU + 2048 → GPU → CPU
+```
+
+```kotlin
+val engine = LlmEngine(
+    models = { id -> modelStore.pathOf(id) },       // you own model files; the engine only needs a path
+    ioDispatcher = Dispatchers.IO,
+    cacheDir = File(context.cacheDir, "litertlm").path,
+    memoryProbe = { readMemory(context) },          // optional: measure what a build costs
+    events = object : EngineEvents {
+        override fun onEngineBuilt(info: EngineInfo) =
+            Log.i(TAG, "up on ${info.compute}, maxTokens=${info.maxTokens}, rung ${info.rungIndex}, ${info.buildMillis}ms")
+    },
+)
+
+engine.useModel("gemma-e2b")
+
+// one-shot
+val title = engine.generate("Summarize in one line: $text")
+
+// multi-turn, streamed
+val chat = engine.startConversation(systemInstruction = "You are a walking companion.")
+engine.sendStream(chat, "I keep circling the same thought.").collect { textSoFar -> render(textSoFar) }
+engine.close(chat)
+```
+
+### Retries that actually retry
+
+The runtime's default seed is fixed. Ask the same prompt twice and you get the same text,
+character for character — so a retry loop that re-asks on a bad answer never retries. Pass the
+attempt number and the engine moves the seed by a prime stride from the second attempt on:
+
+```kotlin
+engine.generate(prompt, attempt = 0)   // reproducible, the answer you measured
+engine.generate(prompt, attempt = 1)   // a different sample
+```
+
+### It tells you what happened — and only what it knows
+
+| | What you get | How it is known |
+|---|---|---|
+| `engine.currentEngine()` | `EngineInfo` — the backend and context cap that *actually* came up, which ladder rung, cold-start ms, memory delta | the rung that succeeded; a clock; your `memoryProbe` |
+| `engine.lastGeneration()` | `GenerationStats` — ms to first token, total ms, chars, chunks, chars/s, whether the output cap hit | measured around each generation |
+| `chat.usage()` | `ContextUsage` — turns, chars in/out, token counts, fraction of the window used | chars are exact; **tokens only if you supply a `TokenCounter`, otherwise `null`** |
+
+Characters are not tokens, and the ratio between them depends on the language and the text.
+The engine will not guess for you.
+
+### Every number is a parameter
+
+```kotlin
+LlmEngine(..., limits = GenerationLimits(
+    maxContextTokens = 2048,      // hard cap every bundled model accepts
+    roomyContextTokens = 4096,    // tried first; costs KV-cache memory
+    maxGenChars = 1000,           // client-side stop for a model that never emits EOS
+    seedStride = 7919,
+    sampling = Sampling(topK = 16, topP = 0.7, temperature = 0.7),
+))
+```
+
+The defaults are what StepGrid ships for Gemma E2B/E4B. They are documented in KDoc with the
+reason each value was chosen; if you run a different model, expect to change them.
+
+## `device-tier`
+
+```kotlin
+when (tierOf(readDeviceSpecs(context))) {
+    ModelTier.UNSUPPORTED -> explainAndStop()
+    ModelTier.LITE        -> download(smallModel)
+    ModelTier.STANDARD    -> download(mediumModel)
+    ModelTier.PRO         -> download(largeModel)
+}
+```
+
+Two axes are judged together — chip class and RAM/cores — because neither is trustworthy alone:
+RAM says an 8 GB budget phone beats a 6 GB flagship; the chip alone puts a big model on a good
+chip with too little RAM. Thresholds are parameters (`TierThresholds`); the defaults assume a
+4B-INT4 / 1.5B / 0.6B lineup.
+
+Android has no API that says how fast a chip is — only a name string — so `classifyChip` is a
+table of known patterns, and unknown chips are capped at `STANDARD`: guessing low costs a better
+answer the user never knows about; guessing high costs a multi-GB download that then crawls or
+crashes. **Do not trust the table; fix it for the devices you actually see**, and read
+`DeviceSpecs.soc` to find out what those were.
+
+## `resume`
+
+Requesting a byte range is not the same as receiving one. A CDN may ignore `Range`, a redirect
+may drop the header, and the response is then a plain 200 from byte zero. Append that to the
+partial file on disk and you get a file of the right size and the wrong contents — which loads
+fine and fails deep inside the runtime, with nothing pointing back at the download.
 
 ```kotlin
 val existing = target.length()
 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
     if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
 }
-
 val plan = ResumePlan.of(existing, conn.responseCode, conn.contentLengthLong)
 
-FileOutputStream(target, plan.append).use { out -> conn.inputStream.copyTo(out) }
-// 진행률은 plan.startAt 부터, 전체는 plan.total (모르면 null)
+FileOutputStream(target, plan.append).use { conn.inputStream.copyTo(it) }
+// progress from plan.startAt; total is plan.total (null if unknown)
 ```
 
-`plan.total` 이 따로 있는 이유는 **206 응답이 남은 양만 알려주기** 때문입니다. 그대로 전체로
-쓰면 거의 다 받은 다운로드가 0퍼센트 근처로 돌아가고, 그건 사용자 눈에 처음부터 다시 받는
-것으로 보입니다 — 이어받기로 고치려던 바로 그 인상입니다.
+`plan.total` exists because a 206 reports only the *remaining* length. Use it as the total and a
+nearly finished download shows 0% — to the user, exactly the restart resume was meant to avoid.
 
-## `device-tier` — 기기 등급 판단
+## Design rules
 
-```kotlin
-val tier = tierOf(readDeviceSpecs(context))
+- **Pure decisions, thin leaves.** `tierOf` / `readDeviceSpecs`, `engineLadder` / `LlmEngine`.
+  If a rule cannot be tested on the JVM, the split is not finished.
+- **Report facts; never present an estimate as one.**
+- **Silent by default.** Nothing is written to Logcat unless you wire `EngineEvents`.
+- **Explicit API.** `explicitApi()` is on; every public declaration has KDoc that says why.
 
-when (tier) {
-    ModelTier.UNSUPPORTED -> 안내만보여준다()
-    ModelTier.LITE -> 받는다(작은모델)
-    ModelTier.STANDARD -> 받는다(중간모델)
-    ModelTier.PRO -> 받는다(큰모델)
-}
-```
+## Versioning
 
-**두 축을 같이 봅니다** — 칩 등급과 RAM/코어입니다. 어느 하나도 혼자서는 못 믿습니다.
-RAM 만 보면 8GB 보급형이 6GB 플래그십을 이긴다고 판단하고, 칩만 보면 좋은 칩인데 RAM 이
-모자란 기기에 큰 모델을 올립니다.
+SemVer. Before 1.0, minor versions may change public API; every such change is listed in
+[CHANGELOG.md](./CHANGELOG.md). See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-경계값은 인자로 바꿉니다. 기본값은 4B INT4 / 1.5B / 0.6B 조합 기준이라 **다른 모델을 쓰면
-그대로 맞지 않습니다.**
-
-```kotlin
-tierOf(specs, TierThresholds(ramProGb = 12.0))
-```
-
-### 모르는 칩을 어떻게 다루나
-
-안드로이드에는 **칩이 얼마나 빠른지 알려주는 API 가 없습니다.** 있는 건 이름 문자열뿐이라
-아는 패턴에 대보는 수밖에 없고, 그래서 이 표는 새 칩이 나오면 그날부터 낡습니다.
-
-`ChipClass.UNKNOWN` 은 RAM 과 코어만으로 `STANDARD` 까지 갈 수 있고 `PRO` 로는 못 갑니다.
-두 방향의 실수가 대가가 다르기 때문입니다.
-
-| 실수 | 사용자가 겪는 것 |
-|---|---|
-| 낮게 잡았다 | 더 좋은 답을 받을 수 있었는데 못 받는다. **본인은 모른다** |
-| 높게 잡았다 | GB 단위를 다 받은 뒤에 **느리거나 죽는다** |
-
-**표를 그대로 믿지 마세요.** 안전한 쪽으로 떨어지도록 판단을 짜 둔 것이지, 표가 맞아서 되는
-게 아닙니다. 쓰시는 기기 목록에 맞게 `classifyChip` 을 고쳐 쓰시는 편이 낫습니다.
-
-## 왜 판단과 조회가 갈라져 있나
-
-`readDeviceSpecs(context)` 는 안드로이드를 읽고, `tierOf(specs)` 는 **순수 함수**입니다.
-
-원래는 한 함수였습니다. 그래서 **테스트가 하나도 없었습니다** — RAM 6GB 에 코어 8개인 미들급
-기기를 만들려면 `Build` 와 `ActivityManager` 를 흉내내야 하고, 그러면 검사하는 것이 판단이
-아니라 흉내가 됩니다.
-
-떼어내려니 그게 걸렸고, 나누고 나서야 테스트가 붙었습니다. 테스트가 안 써지는 것과 떼어낼 수
-없는 것이 **같은 원인**이었습니다.
-
-## 개발
+## Development
 
 ```bash
-./gradlew :resume:test :device-tier:testDebugUnitTest
+./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest
 ```
 
-## 라이선스
+## License
 
 [Apache License 2.0](./LICENSE)

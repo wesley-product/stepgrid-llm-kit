@@ -1,0 +1,46 @@
+# Unit tests on the JVM for every module, then assemble the library artifacts.
+# Nothing here needs a device: all decision logic is pure Kotlin by design (see CONTRIBUTING.md).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # compileSdk 36 — make sure the platform is present and licenses are accepted before Gradle
+      # tries to download it itself (which fails on a clean runner without accepted licenses).
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-36
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Assemble
+        run: ./gradlew assemble --no-daemon
+
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/build/test-results/**/*.xml'
+          if-no-files-found: ignore
