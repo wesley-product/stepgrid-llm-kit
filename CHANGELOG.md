@@ -6,7 +6,7 @@ Before 1.0, minor versions may change public API — each such change is listed 
 
 ## [Unreleased]
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-09-14
 
 First release. Everything here was extracted from a shipping Android app that runs Gemma on-device
 with LiteRT-LM; each piece exists because the app hit the problem it solves.
