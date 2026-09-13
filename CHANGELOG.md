@@ -39,8 +39,9 @@ nonsense, and it did not.
   - The output cap applies to `send()` too, not just the streamed paths: a model that never
     emits EOS would otherwise hold the engine — and every model switch and teardown queued
     behind it — for as long as it kept talking.
-  - A closed engine stays closed: every call throws `EngineClosedException` instead of
-    half-working with a cancelled chat-closing scope.
+  - A closed engine stays closed: every generating or model-changing call throws
+    `EngineClosedException` instead of half-working with a cancelled chat-closing scope. Teardown
+    stays quiet — `close(chat)` warns, `warmUp()` does nothing — since both are called on the way out.
   - Observability that reports only what is known for certain: `EngineInfo` (backend, context cap,
     ladder rung, build time, memory delta), `GenerationStats` (time to first token, total, chars,
     chunks, cap hit), `ContextUsage` (exact chars; token counts only with a supplied `TokenCounter`,

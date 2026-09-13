@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.lastOrNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
@@ -181,9 +182,12 @@ public class LlmEngine(
 
     /**
      * Tear everything down: the engine, and the scope that closes chats. **The instance is dead
-     * afterwards** — every call throws [EngineClosedException], and [close] of a chat does nothing
-     * (it is reported through [EngineEvents.onWarning]). Build a new [LlmEngine] to use a model
-     * again. Calling this twice is harmless.
+     * afterwards.** Every call that would generate or change the model — [generate], [generateStream],
+     * [startConversation], [send], [sendStream], [useModel], [forget] — throws
+     * [EngineClosedException]. The two teardown paths stay quiet on purpose, because they get called
+     * from code that is already tearing a screen down: [close] of a chat does nothing and reports it
+     * through [EngineEvents.onWarning], and [warmUp] returns without doing anything. Build a new
+     * [LlmEngine] to use a model again. Calling this twice is harmless.
      */
     public suspend fun close() {
         withContext(ioDispatcher) {
@@ -262,7 +266,11 @@ public class LlmEngine(
                 val live = engine()
                 val sampler = samplerFor(attempt, sampling, limits.seedStride).toRuntime()
                 live.createConversation(ConversationConfig(samplerConfig = sampler)).use { conversation ->
-                    outcome = drain(conversation, conversation.sendMessageAsync(prompt), maxChars) { send(it) }
+                    outcome = drain(
+                        source = conversation.sendMessageAsync(prompt).map { rawTextOf(it) },
+                        maxChars = maxChars,
+                        stop = { stopGenerating(conversation) },
+                    ) { send(it) }
                 }
             }
             outcome?.downstream?.let { throw it }
@@ -348,9 +356,21 @@ public class LlmEngine(
                 if (chat.interrupted) throw ChatInterruptedException()
                 chat.tracker.addInput(message)
                 inputCounted = true
-                outcome = drain(chat.conversation, chat.conversation.sendMessageAsync(message), maxChars) {
-                    finalText = it
-                    send(it)
+                try {
+                    outcome = drain(
+                        source = chat.conversation.sendMessageAsync(message).map { rawTextOf(it) },
+                        maxChars = maxChars,
+                        stop = { stopGenerating(chat.conversation) },
+                    ) {
+                        finalText = it
+                        send(it)
+                    }
+                } catch (t: Throwable) {
+                    // The message already reached the conversation. Whatever the runtime committed
+                    // before it failed stays in its history, so this chat cannot be continued
+                    // honestly either — mark it before the failure leaves.
+                    chat.interrupted = true
+                    throw t
                 }
                 // The runtime keeps whatever it committed before we told it to stop, so this
                 // conversation can no longer be continued honestly.
@@ -413,7 +433,7 @@ public class LlmEngine(
     // ---- internals ---------------------------------------------------------------------------
 
     /** What a streamed generation ended up doing. */
-    private class StreamOutcome(val capped: Boolean, val downstream: Throwable?) {
+    internal class StreamOutcome(val capped: Boolean, val downstream: Throwable?) {
         /** The runtime was told to stop rather than being allowed to finish. */
         val stoppedEarly: Boolean get() = capped || downstream != null
     }
@@ -430,31 +450,48 @@ public class LlmEngine(
      *
      * The cost is honest: after the cap or a cancellation this can still take as long as the
      * runtime needs to wind down.
+     *
+     * Takes raw chunks and a [stop] callback rather than the runtime's own types, so the one path
+     * that cannot be exercised on a device — a stream that dies the instant it is told to stop —
+     * can be reproduced with a plain [Flow] in a unit test.
      */
-    private suspend fun drain(
-        conversation: Conversation,
-        source: Flow<Message>,
+    internal suspend fun drain(
+        source: Flow<String>,
         maxChars: Int,
+        stop: () -> Unit,
         emit: suspend (String) -> Unit,
     ): StreamOutcome {
         val acc = StreamAccumulator(limits.streamMode)
         var capped = false
         var downstream: Throwable? = null
+        var stopRequested = false
         withContext(NonCancellable) {
-            source.collect { m ->
-                val text = acc.push(rawTextOf(m))
-                if (capped || downstream != null) return@collect          // draining: read, deliver nothing
-                if (text.length >= maxChars) {
-                    capped = true
-                    stopGenerating(conversation)
-                    return@collect
+            try {
+                source.collect { chunk ->
+                    val text = acc.push(chunk)
+                    if (stopRequested) return@collect                      // draining: read, deliver nothing
+                    if (text.length >= maxChars) {
+                        capped = true
+                        stopRequested = true
+                        stop()
+                        return@collect
+                    }
+                    try {
+                        emit(text)
+                    } catch (t: Throwable) {                               // collector gone, or cancelled
+                        downstream = t
+                        stopRequested = true
+                        stop()
+                    }
                 }
-                try {
-                    emit(text)
-                } catch (t: Throwable) {                                   // collector gone, or cancelled
-                    downstream = t
-                    stopGenerating(conversation)
-                }
+            } catch (t: Throwable) {
+                // We asked the runtime to stop, so the stream ending abruptly IS the answer to that
+                // request — LiteRT-LM's callbackFlow most often ends it as a CancellationException.
+                // Letting it out here would throw away the outcome: the caller would never learn the
+                // reply was cut, and a Chat would go on looking usable with half an assistant turn
+                // already in its history. Only a stream we did NOT stop is a real failure.
+                if (t is Error || !stopRequested) throw t
+                events.onWarning("the runtime stream ended abruptly after cancelProcess", t)
             }
         }
         return StreamOutcome(capped, downstream)

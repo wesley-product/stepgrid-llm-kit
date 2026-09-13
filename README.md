@@ -171,7 +171,9 @@ engine.startConversation(system, sampling = chatty)   // fixed for that conversa
 - Cancelling the collector of a streamed reply stops delivery, asks the runtime to stop generating,
   and only then releases the engine — so the next call never starts while the previous one is still
   running. (The runtime's own `Flow` does nothing on cancellation; this library asks explicitly.)
-- `engine.close()` is final. Every later call throws `EngineClosedException`.
+- `engine.close()` is final. Every later call that would generate or change the model throws
+  `EngineClosedException`. The teardown paths stay quiet instead — `close(chat)` reports a warning
+  and `warmUp()` does nothing — because they are called from code that is already going away.
 
 ### It tells you what happened — and only what it knows
 
