@@ -29,6 +29,9 @@ public data class Sampling(
  *   this is what stops a repetition spiral from holding the engine for 30s+.
  * @property seedStride Distance between seeds of successive retries. Adjacent seeds (0, 1) were
  *   observed to yield byte-identical output; far-apart primes don't.
+ * @property streamMode Whether streamed chunks are deltas or cumulative snapshots. The default
+ *   matches LiteRT-LM 0.13.x; change it only if your runtime differs. See [StreamMode] for why
+ *   this is stated rather than detected.
  */
 public data class GenerationLimits(
     val maxContextTokens: Int = 2048,
@@ -36,6 +39,7 @@ public data class GenerationLimits(
     val maxGenChars: Int = 1000,
     val seedStride: Int = 7919,
     val sampling: Sampling = Sampling(),
+    val streamMode: StreamMode = StreamMode.DELTA,
 )
 
 /**

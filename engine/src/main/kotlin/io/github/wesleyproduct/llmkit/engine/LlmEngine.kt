@@ -13,15 +13,15 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.lastOrNull
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -42,6 +42,11 @@ import kotlinx.coroutines.withContext
  * **Threading.** Every call that touches the runtime — including model switches and teardown — runs
  * on [ioDispatcher], never on the caller's thread. Every [EngineEvents] callback is delivered on
  * [ioDispatcher] too, including the ones that follow a streamed generation.
+ *
+ * **Stopping early.** When a streamed collector is cancelled or the output cap trips, the runtime is
+ * told to stop (`cancelProcess`) before the engine is released — the runtime's own `Flow` does
+ * nothing on cancellation, so without this the previous generation would still be running when the
+ * next request acquired the engine.
  *
  * What the engine *does* know, it reports: [currentEngine] says which backend and context size
  * actually came up and what that cost; every generation produces a [GenerationStats]; every [Chat]
@@ -71,6 +76,7 @@ public class LlmEngine(
 
     // Touched only under engineMutex, except `current`, `info` and `lastStats`, read free as hints.
     private var engine: Engine? = null
+    @Volatile private var closed = false
     @Volatile private var current: String? = null
     @Volatile private var info: EngineInfo? = null
     @Volatile private var lastStats: GenerationStats? = null
@@ -92,14 +98,35 @@ public class LlmEngine(
         internal val epoch: Int,
         internal val tracker: ContextUsageTracker,
     ) {
+        /** Set once a reply was stopped part-way — by the output cap or by a cancelled collector. */
+        @Volatile internal var interrupted: Boolean = false
+
         /** How much of the context window this chat has consumed, as far as is known. Safe to call
          *  from any thread while a generation is running. */
         public fun usage(): ContextUsage = tracker.snapshot()
+
+        /**
+         * Whether this conversation can still be used. Becomes `false` after a reply was stopped
+         * part-way: the runtime does not roll its history back, so the model's context now holds a
+         * half-finished assistant turn and every later turn would be conditioned on it.
+         */
+        public fun isUsable(): Boolean = !interrupted
     }
 
     /** A [Chat] outlived the model it was opened on: its engine — and with it the conversation's
      *  native state — is gone. Recoverable: open a new conversation. */
     public class StaleModelException : IllegalStateException("the model changed; this conversation is gone")
+
+    /** The engine was [close]d. It cannot be reused; build a new [LlmEngine]. */
+    public class EngineClosedException : IllegalStateException("this LlmEngine has been closed")
+
+    /**
+     * A reply on this [Chat] was stopped part-way, so the runtime's history holds a half-finished
+     * assistant turn. Continuing would condition every later turn on it. Open a new conversation.
+     */
+    public class ChatInterruptedException : IllegalStateException(
+        "this conversation was interrupted part-way; its context is incomplete — open a new one",
+    )
 
     // ---- observability -----------------------------------------------------------------------
 
@@ -115,28 +142,37 @@ public class LlmEngine(
      * Point the runtime at a different model. The engine caches weights, so switching means tearing
      * the old one down and letting the next call rebuild. Conversations opened on the old engine die
      * with it — [send] on one throws [StaleModelException] rather than calling into freed memory.
+     *
+     * @throws EngineClosedException if the engine was closed.
      */
     public suspend fun useModel(modelId: String): Unit = withContext(ioDispatcher) {
         engineMutex.withLock {
+            ensureOpen()
             if (current == modelId) return@withLock
             release(ReleaseReason.MODEL_SWITCHED)
             current = modelId
         }
     }
 
-    /** Whether a model is selected and its weights are on disk. */
-    public fun isReady(): Boolean = current?.let { models.pathOf(it) } != null
+    /** Whether a model is selected and its weights are on disk. `false` once closed. */
+    public fun isReady(): Boolean = !closed && current?.let { models.pathOf(it) } != null
 
     /** The model currently selected (loaded or not). Read without the lock — it is only a hint. */
     public fun currentModel(): String? = current
+
+    /** Whether [close] has been called. A closed engine refuses every further call. */
+    public fun isClosed(): Boolean = closed
 
     /**
      * A model's weights were deleted. If it is the one loaded, tear the engine down so the memory is
      * actually reclaimed — otherwise the engine would sit open on unlinked weights until the process
      * dies. No-op if some other model (or none) is loaded.
+     *
+     * @throws EngineClosedException if the engine was closed.
      */
     public suspend fun forget(modelId: String): Unit = withContext(ioDispatcher) {
         engineMutex.withLock {
+            ensureOpen()
             if (current != modelId) return@withLock
             release(ReleaseReason.MODEL_FORGOTTEN)
             current = null
@@ -144,18 +180,26 @@ public class LlmEngine(
     }
 
     /**
-     * Tear everything down: the engine, and the scope that closes chats. After this the instance is
-     * dead — build a new one to use a model again. Call from wherever the engine's owner is destroyed.
-     * A [close] of a chat issued after this does nothing (and says so through [EngineEvents.onWarning]).
+     * Tear everything down: the engine, and the scope that closes chats. **The instance is dead
+     * afterwards** — every call throws [EngineClosedException], and [close] of a chat does nothing
+     * (it is reported through [EngineEvents.onWarning]). Build a new [LlmEngine] to use a model
+     * again. Calling this twice is harmless.
      */
     public suspend fun close() {
         withContext(ioDispatcher) {
             engineMutex.withLock {
+                if (closed) return@withLock
                 release(ReleaseReason.CLOSED)
                 current = null
+                closed = true
             }
         }
         closeScope.cancel()
+    }
+
+    /** Under [engineMutex]. */
+    private fun ensureOpen() {
+        if (closed) throw EngineClosedException()
     }
 
     /** Under [engineMutex], on [ioDispatcher]. */
@@ -193,10 +237,12 @@ public class LlmEngine(
 
     /**
      * Streamed one-shot generation. Each emission is the raw text SO FAR (see [StreamAccumulator]).
-     * Holds the engine for the whole run. Cold: collect once per call. Stops — and releases the
-     * engine — as soon as the text reaches [maxChars]; the chunk that crossed the cap is not emitted
-     * and not counted in the stats. Stats are published on normal completion and on cancellation
-     * (what was delivered is real either way); a failure publishes nothing.
+     * Holds the engine for the whole run. Cold: collect once per call.
+     *
+     * Stops as soon as the text reaches [maxChars]; the chunk that crossed the cap is not emitted
+     * and not counted. On cancellation or cap the runtime is asked to stop before the engine is
+     * released. Stats are published on normal completion and on cancellation (what was delivered is
+     * real either way); a failure publishes nothing.
      *
      * @param sampling See [generate] — prefer `limits.sampling.copy(...)` over a fresh instance.
      */
@@ -207,19 +253,23 @@ public class LlmEngine(
         maxChars: Int = limits.maxGenChars,
     ): Flow<String> {
         val stats = StatsRecorder(attempt, clock)
-        var capped = false
-        return flow {
+        var outcome: StreamOutcome? = null
+        return channelFlow {
             engineMutex.withLock {
+                ensureOpen()
                 val sampler = samplerFor(attempt, sampling, limits.seedStride).toRuntime()
                 engine().createConversation(ConversationConfig(samplerConfig = sampler)).use { conversation ->
-                    val acc = StreamAccumulator()
-                    conversation.sendMessageAsync(prompt).collect { emit(acc.push(rawTextOf(it))) }
+                    outcome = drain(conversation, conversation.sendMessageAsync(prompt), maxChars) { send(it) }
                 }
             }
+            outcome?.downstream?.let { throw it }
         }
-            .transformWhile { text -> if (text.length < maxChars) { emit(text); true } else { capped = true; false } }
             .onEach { stats.emission(it) }
-            .onCompletion { cause -> if (cause == null || cause is CancellationException) publish(stats.finish(truncatedByCap = capped)) }
+            .onCompletion { cause ->
+                if (cause == null || cause is CancellationException) {
+                    publish(stats.finish(truncatedByCap = outcome?.capped == true))
+                }
+            }
             .flowOn(ioDispatcher)   // everything above — including the stats callback — runs on the engine's dispatcher
     }
 
@@ -229,12 +279,14 @@ public class LlmEngine(
      *
      * @param sampling Decoding for the whole conversation. The runtime fixes it when the
      *   conversation is created, so it cannot change per [send]. Prefer `limits.sampling.copy(...)`.
+     * @throws EngineClosedException if the engine was closed.
      */
     public suspend fun startConversation(
         systemInstruction: String,
         sampling: Sampling = limits.sampling,
     ): Chat = withContext(ioDispatcher) {
         engineMutex.withLock {
+            ensureOpen()
             val conversation = engine().createConversation(
                 ConversationConfig(
                     systemInstruction = Contents.of(systemInstruction),
@@ -249,50 +301,65 @@ public class LlmEngine(
 
     /**
      * Send one message on an existing chat and return the reply text, trimmed.
+     *
+     * Runs through the streamed path, so the output cap applies here too: without it a model that
+     * never emits EOS would hold the engine — and every other caller, model switch and teardown
+     * waiting on it — for as long as it kept talking.
+     *
+     * A reply stopped by the cap leaves the conversation unusable ([Chat.isUsable]); the truncated
+     * text is still returned, but the next call throws [ChatInterruptedException].
+     *
      * @throws StaleModelException if the model was switched since [chat] was opened.
+     * @throws ChatInterruptedException if an earlier reply on this chat was stopped part-way.
+     * @throws EngineClosedException if the engine was closed.
      */
-    public suspend fun send(chat: Chat, message: String): String = withContext(ioDispatcher) {
-        val stats = StatsRecorder(attempt = 0, now = clock)
-        engineMutex.withLock {
-            if (chat.epoch != epoch) throw StaleModelException()
-            chat.tracker.addInput(message)
-            val reply = textOf(chat.conversation.sendMessage(message))
-            chat.tracker.addOutput(reply)
-            stats.emission(reply)
-            publish(stats.finish(truncatedByCap = false))
-            reply
-        }
-    }
+    public suspend fun send(chat: Chat, message: String, maxChars: Int = limits.maxGenChars): String =
+        withContext(ioDispatcher) { sendStream(chat, message, maxChars).lastOrNull().orEmpty().trim() }
 
     /**
      * Streamed reply: emits the text so far as the model generates it. Holds the engine for the
-     * whole generation, like [send]. Emissions are untrimmed; trim the final text. Cold: collect once.
-     * Stops at [maxChars] the same way [generateStream] does. Bookkeeping follows what actually
-     * reached the conversation: a stale chat counts nothing; a runtime failure after the message was
-     * sent counts the input but no output and publishes no stats; normal completion and cancellation
-     * count both (the text delivered so far is in the conversation either way).
+     * whole generation. Emissions are untrimmed; trim the final text. Cold: collect once.
+     *
+     * Stops at [maxChars] the same way [generateStream] does, and asks the runtime to stop before
+     * releasing the engine. Bookkeeping follows what actually reached the conversation: a stale
+     * chat counts nothing; a runtime failure after the message was sent counts the input but no
+     * output and publishes no stats; normal completion and cancellation count both.
+     *
+     * Stopping a reply part-way — cap or cancellation — marks the chat unusable: the runtime keeps
+     * the partial assistant turn in its history and will not roll it back, so every later turn
+     * would be conditioned on half a sentence. Check [Chat.isUsable] and open a new conversation.
+     *
      * @throws StaleModelException if the model was switched since [chat] was opened.
+     * @throws ChatInterruptedException if an earlier reply on this chat was stopped part-way.
+     * @throws EngineClosedException if the engine was closed.
      */
     public fun sendStream(chat: Chat, message: String, maxChars: Int = limits.maxGenChars): Flow<String> {
         val stats = StatsRecorder(attempt = 0, now = clock)
-        var capped = false
+        var outcome: StreamOutcome? = null
         var finalText = ""
         var inputCounted = false
-        return flow {
+        return channelFlow {
             engineMutex.withLock {
+                ensureOpen()
                 if (chat.epoch != epoch) throw StaleModelException()
+                if (chat.interrupted) throw ChatInterruptedException()
                 chat.tracker.addInput(message)
                 inputCounted = true
-                val acc = StreamAccumulator()
-                chat.conversation.sendMessageAsync(message).collect { emit(acc.push(rawTextOf(it))) }
+                outcome = drain(chat.conversation, chat.conversation.sendMessageAsync(message), maxChars) {
+                    finalText = it
+                    send(it)
+                }
+                // The runtime keeps whatever it committed before we told it to stop, so this
+                // conversation can no longer be continued honestly.
+                if (outcome?.stoppedEarly == true) chat.interrupted = true
             }
+            outcome?.downstream?.let { throw it }
         }
-            .transformWhile { text -> if (text.length < maxChars) { emit(text); true } else { capped = true; false } }
-            .onEach { finalText = it; stats.emission(it) }
+            .onEach { stats.emission(it) }
             .onCompletion { cause ->
                 if (inputCounted && (cause == null || cause is CancellationException)) {
                     chat.tracker.addOutput(finalText)
-                    publish(stats.finish(truncatedByCap = capped))
+                    publish(stats.finish(truncatedByCap = outcome?.capped == true))
                 }
             }
             .flowOn(ioDispatcher)
@@ -303,11 +370,11 @@ public class LlmEngine(
      * its own `close()` does to conversations it created — we assume it tears them down too, and
      * skip closing a stale chat rather than risk a double free. Worst case if that assumption is
      * wrong is a leak, which is the side to be wrong on. Failures are reported via
-     * [EngineEvents.onWarning], never thrown. After [close] of the engine itself this is a no-op
+     * [EngineEvents.onWarning], never thrown. After the engine itself is [close]d this is a no-op
      * and is reported as such.
      */
     public fun close(chat: Chat) {
-        if (!closeScope.isActive) {
+        if (closed || !closeScope.isActive) {
             events.onWarning("close(chat) after the engine was closed — nothing to do", null)
             return
         }
@@ -320,15 +387,18 @@ public class LlmEngine(
 
     /**
      * Build the engine for the selected model ahead of time (no generation) so the first real call
-     * doesn't pay the multi-second cold load. No-op when nothing is downloaded; cheap once built.
-     * Same exception discipline as the ladder: cancellation and JVM [Error]s propagate; only the
-     * runtime's own failures are reported as a warning.
+     * doesn't pay the multi-second cold load. No-op when nothing is downloaded or the engine is
+     * closed; cheap once built. Same exception discipline as the ladder: cancellation and JVM
+     * [Error]s propagate; only the runtime's own failures are reported as a warning.
      */
     public suspend fun warmUp() {
         if (!isReady()) return
         withContext(ioDispatcher) {
             try {
-                engineMutex.withLock { engine() }
+                engineMutex.withLock {
+                    ensureOpen()
+                    engine()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -339,12 +409,68 @@ public class LlmEngine(
 
     // ---- internals ---------------------------------------------------------------------------
 
+    /** What a streamed generation ended up doing. */
+    private class StreamOutcome(val capped: Boolean, val downstream: Throwable?) {
+        /** The runtime was told to stop rather than being allowed to finish. */
+        val stoppedEarly: Boolean get() = capped || downstream != null
+    }
+
+    /**
+     * Run one generation to the end of the runtime's stream, delivering text through [emit] until
+     * the cap trips or the collector goes away.
+     *
+     * **It always waits for the runtime's stream to finish**, even when we stopped wanting the
+     * text. `cancelProcess()` returns `Unit` and promises nothing about when generation actually
+     * ends, so returning early would let the conversation — and the engine behind it — be closed
+     * while a native callback is still running. Draining under [NonCancellable] is what makes
+     * closing safe, and holding [engineMutex] throughout is what keeps the next request out.
+     *
+     * The cost is honest: after the cap or a cancellation this can still take as long as the
+     * runtime needs to wind down.
+     */
+    private suspend fun drain(
+        conversation: Conversation,
+        source: Flow<Message>,
+        maxChars: Int,
+        emit: suspend (String) -> Unit,
+    ): StreamOutcome {
+        val acc = StreamAccumulator(limits.streamMode)
+        var capped = false
+        var downstream: Throwable? = null
+        withContext(NonCancellable) {
+            source.collect { m ->
+                val text = acc.push(rawTextOf(m))
+                if (capped || downstream != null) return@collect          // draining: read, deliver nothing
+                if (text.length >= maxChars) {
+                    capped = true
+                    stopGenerating(conversation)
+                    return@collect
+                }
+                try {
+                    emit(text)
+                } catch (t: Throwable) {                                   // collector gone, or cancelled
+                    downstream = t
+                    stopGenerating(conversation)
+                }
+            }
+        }
+        return StreamOutcome(capped, downstream)
+    }
+
+    /**
+     * Ask the runtime to stop generating. Its own `Flow` is a `callbackFlow` whose `awaitClose`
+     * body is empty, so cancelling the collector detaches from the stream without stopping the work
+     * behind it. This only *asks*; [drain] is what waits. Never throws — we are already unwinding.
+     */
+    private fun stopGenerating(conversation: Conversation) {
+        runCatching { conversation.cancelProcess() }
+            .onFailure { events.onWarning("cancelProcess failed", it) }
+    }
+
     private fun publish(stats: GenerationStats) {
         lastStats = stats
         events.onGeneration(stats)
     }
-
-    private fun textOf(m: Message): String = rawTextOf(m).trim()
 
     private fun rawTextOf(m: Message): String =
         m.contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }

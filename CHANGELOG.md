@@ -26,7 +26,18 @@ reply arrived as 44 chunks — 96 characters, first chunk at 1.4 s, 3.1 s in tot
     stride, because a retry with the runtime's fixed default seed returns the same text.
   - Streamed (`Flow<String>`, cumulative text) and one-shot generation; multi-turn `Chat` with a
     stale-conversation guard after a model switch.
-  - `StreamAccumulator` — merges delta or cumulative-snapshot chunks transparently.
+  - Streaming that stops when you stop: cancelling a collector, or hitting the output cap,
+    asks the runtime to stop generating before the engine is released. The runtime's own
+    `Flow` does nothing on cancellation, so without this the previous generation would still
+    be running when the next request acquired the engine.
+  - `StreamMode` — whether chunks are deltas or cumulative snapshots is **stated**, not
+    guessed. A model that repeats a token emits the same chunk twice, which no heuristic can
+    tell apart from a snapshot; guessing dropped the repetition. Default matches LiteRT-LM 0.13.x.
+  - The output cap applies to `send()` too, not just the streamed paths: a model that never
+    emits EOS would otherwise hold the engine — and every model switch and teardown queued
+    behind it — for as long as it kept talking.
+  - A closed engine stays closed: every call throws `EngineClosedException` instead of
+    half-working with a cancelled chat-closing scope.
   - Observability that reports only what is known for certain: `EngineInfo` (backend, context cap,
     ladder rung, build time, memory delta), `GenerationStats` (time to first token, total, chars,
     chunks, cap hit), `ContextUsage` (exact chars; token counts only with a supplied `TokenCounter`,

@@ -168,8 +168,10 @@ engine.startConversation(system, sampling = chatty)   // fixed for that conversa
   tells you which rung failed and why.
 - Everything that touches the runtime runs on the `ioDispatcher` you pass — including `useModel`,
   teardown, and every `EngineEvents` callback. Hop to the main thread yourself for UI.
-- Cancelling the collector of a streamed reply stops delivery and releases the engine. Whether the
-  runtime stops generating internally at that moment is the runtime's behaviour, not this library's.
+- Cancelling the collector of a streamed reply stops delivery, asks the runtime to stop generating,
+  and only then releases the engine — so the next call never starts while the previous one is still
+  running. (The runtime's own `Flow` does nothing on cancellation; this library asks explicitly.)
+- `engine.close()` is final. Every later call throws `EngineClosedException`.
 
 ### It tells you what happened — and only what it knows
 
@@ -196,6 +198,12 @@ LlmEngine(..., limits = GenerationLimits(
 
 The defaults are what StepGrid ships for Gemma E2B/E4B. They are documented in KDoc with the
 reason each value was chosen; if you run a different model, expect to change them.
+
+`streamMode` is the one setting you should not guess at. Chunks arrive either as deltas or as
+cumulative snapshots, and **no amount of inspecting the text can tell them apart** — a model that
+repeats a token sends the same chunk twice, which looks exactly like a snapshot of what came
+before. The default (`StreamMode.DELTA`) is what LiteRT-LM 0.13.x does; set it explicitly if your
+runtime differs, or you will silently lose repeated text.
 
 ## `device-tier`
 

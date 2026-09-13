@@ -2,7 +2,7 @@
 agp = "9.4.0"
 kotlin = "2.2.10"
 junitJupiter = "5.11.4"
-mavenPublish = "0.30.0"
+mavenPublish = "0.33.0"
 coroutines = "1.11.0"
 # The on-device runtime the engine module wraps. Pinned here only; consumers may override.
 litertlm = "0.13.1"
