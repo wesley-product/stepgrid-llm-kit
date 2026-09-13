@@ -4,6 +4,7 @@ One maintainer, manual releases. This is the checklist; nothing here is automate
 
 ## Before tagging
 
+- [ ] **JDK 21.** LiteRT-LM ships Java 21 class files, so anything older fails to load its types.
 - [ ] `./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest` — green
 - [ ] CI green on `main` for the commit being released
 - [ ] A real app on a real device has exercised the engine end to end: tier → download → `useModel`
@@ -32,9 +33,31 @@ One maintainer, manual releases. This is the checklist; nothing here is automate
    each of `llm-kit`, `engine`, `device-tier`, `resume` must have the artifact (`.aar`/`.jar`),
    `-sources.jar`, `-javadoc.jar`, `.pom` and `.module`. The `llm-kit` POM must list the other
    three as `compile` dependencies.
-4. **Publish.** `./gradlew publishToMavenCentral`, then release the deployment in the
-   [Central Portal](https://central.sonatype.com/publishing/deployments). Validation failures are
-   shown there, not in Gradle output.
+4. **Publish.** `./gradlew publishAllPublicationsToMavenCentralRepository`, then release the
+   deployment in the [Central Portal](https://central.sonatype.com/publishing/deployments).
+   Validation failures are shown there, not in Gradle output.
+
+   **This step does not work on Windows.** The plugin stages the bundle under a `file://C:\...`
+   URI and then fails with `Cannot convert URI '...' to a file` — same on plugin 0.30.0 and 0.33.0.
+   Until that is fixed upstream, build the bundle from the local repository by hand and post it to
+   the Portal's REST API:
+
+   ```bash
+   ./gradlew publishToMavenLocal          # step 3 already did this
+   ```
+   Then zip `~/.m2/repository/io/github/wesley-product/**` for this version — keeping the Maven
+   directory layout, and including the `.asc` signature and `.md5`/`.sha1` checksums next to every
+   file — and upload it:
+   ```
+   POST https://central.sonatype.com/api/v1/publisher/upload?publishingType=USER_MANAGED
+        Authorization: Bearer <base64 of "user-token-name:user-token-password">
+        multipart/form-data, field name "bundle"
+   ```
+   The response body is the deployment id. Poll
+   `POST /api/v1/publisher/status?id=<id>` until the state is `VALIDATED` (or `FAILED`, which lists
+   the reasons), and `DELETE /api/v1/publisher/deployment/<id>` throws an unreleased one away.
+   `USER_MANAGED` means nothing is public until the Portal's **Publish** button is pressed —
+   which is the one irreversible step in this whole document.
 5. **Tag.** `git tag vx.y.z && git push origin vx.y.z`, and create a GitHub release pointing at the
    changelog entry — the `CHANGELOG.md` link expects it to exist.
 6. **Back to snapshot.** `VERSION_NAME=x.y.(z+1)-SNAPSHOT`, commit.
