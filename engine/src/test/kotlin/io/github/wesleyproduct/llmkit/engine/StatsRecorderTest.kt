@@ -20,7 +20,7 @@ class StatsRecorderTest {
         r.emission("안")
         c.t += 2_000
         r.emission("안녕하세요")
-        val s = r.finish(maxChars = 1000)
+        val s = r.finish(truncatedByCap = false)
         assertEquals(850L, s.firstTokenMillis)
         assertEquals(2_850L, s.totalMillis)
     }
@@ -29,7 +29,7 @@ class StatsRecorderTest {
     fun `chars is the final text length, emissions the chunk count`() {
         val r = StatsRecorder(attempt = 0, now = Clock())
         r.emission("a"); r.emission("ab"); r.emission("abc")
-        val s = r.finish(1000)
+        val s = r.finish(truncatedByCap = false)
         assertEquals(3, s.chars)
         assertEquals(3, s.emissions)
     }
@@ -39,20 +39,22 @@ class StatsRecorderTest {
         val c = Clock()
         val r = StatsRecorder(attempt = 0, now = c)
         c.t += 300
-        val s = r.finish(1000)
+        val s = r.finish(truncatedByCap = false)
         assertNull(s.firstTokenMillis)
         assertEquals(0, s.chars)
         assertEquals(300L, s.totalMillis)
     }
 
     @Test
-    fun `hitting the cap is reported`() {
+    fun `the cap flag is what the engine observed, not inferred from length`() {
+        // The engine decides truncation when it drops the chunk that crossed the cap; the recorder
+        // only ever sees delivered chunks, so it must not re-derive the flag from chars.
         val r = StatsRecorder(attempt = 1, now = Clock())
-        r.emission("x".repeat(1000))
-        assertTrue(r.finish(maxChars = 1000).truncatedByCap)
+        r.emission("x".repeat(990))
+        assertTrue(r.finish(truncatedByCap = true).truncatedByCap)
         val r2 = StatsRecorder(attempt = 0, now = Clock())
-        r2.emission("short")
-        assertFalse(r2.finish(1000).truncatedByCap)
+        r2.emission("x".repeat(990))
+        assertFalse(r2.finish(truncatedByCap = false).truncatedByCap)
     }
 
     @Test
@@ -61,15 +63,15 @@ class StatsRecorderTest {
         val r = StatsRecorder(attempt = 0, now = c)
         c.t += 2_000
         r.emission("x".repeat(100))
-        assertEquals(50.0, r.finish(1000).charsPerSecond, 0.0001)
+        assertEquals(50.0, r.finish(false).charsPerSecond, 0.0001)
 
         val instant = StatsRecorder(attempt = 0, now = Clock())
         instant.emission("abc")
-        assertEquals(0.0, instant.finish(1000).charsPerSecond)
+        assertEquals(0.0, instant.finish(false).charsPerSecond)
     }
 
     @Test
     fun `the attempt index is carried through`() {
-        assertEquals(3, StatsRecorder(attempt = 3, now = Clock()).finish(1000).attempt)
+        assertEquals(3, StatsRecorder(attempt = 3, now = Clock()).finish(false).attempt)
     }
 }

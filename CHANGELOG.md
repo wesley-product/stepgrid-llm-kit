@@ -26,6 +26,13 @@ with LiteRT-LM; each piece exists because the app hit the problem it solves.
     chunks, cap hit), `ContextUsage` (exact chars; token counts only with a supplied `TokenCounter`,
     otherwise `null`), `EngineEvents` callbacks (silent by default).
   - `GenerationLimits` / `Sampling` — every number is a parameter, not a constant.
+  - Per-call `sampling` and `maxChars` on `generate` / `generateStream`, per-conversation `sampling`
+    on `startConversation` — deterministic summaries and a chatty assistant from one engine.
+  - `LlmEngine.close()` to tear the whole engine down when its owner is destroyed.
+  - Threading contract: everything that touches the runtime — model switches and teardown
+    included — runs on the engine's `ioDispatcher`, and so does every `EngineEvents` callback.
+    Cancellation is never swallowed by the fallback ladder; JVM `Error`s stop it immediately.
+    A failure while closing a chat is reported via `onWarning`, never thrown into the process.
 - **`device-tier`** — pick a model size from real device specs: `readDeviceSpecs(context)` (Android)
   and `tierOf(specs, thresholds)` (pure). Chip class and RAM/cores are judged together; unknown chips
   cap at `STANDARD`. `DeviceSpecs.soc` keeps the raw chip name so unknown devices can be identified later.

@@ -28,6 +28,13 @@ dependencies {
 `engine` 이 LiteRT-LM 을 `api` 로 끌고 옵니다. minSdk 26. 소비자용 ProGuard 규칙은 필요 없습니다 —
 리플렉션도 직렬화도 안 써서 R8 은 여러분이 부르는 것만 남깁니다.
 
+> **상태:** `0.1.0` 은 준비 중이고 아직 Maven Central 에 없습니다. 그 전까지는 이 저장소를 옆에 받아
+> `settings.gradle.kts` 에서 `includeBuild` 로 무는 방법이 있습니다. 올라가면 이 줄이 사라집니다.
+
+**모델 파일은 여러분이 준비합니다.** 이 라이브러리는 경로만 받습니다. LiteRT-LM 형식(`.litertlm`)의
+Gemma 모델은 [LiteRT-LM 문서](https://developers.google.com/edge/litert-lm)와 Hugging Face 의
+`litert-community` 에서 구할 수 있고, 각 모델의 라이선스를 확인하는 것도 여러분 몫입니다.
+
 ## `engine` — 추론·스트리밍
 
 LiteRT-LM 의 `Backend.GPU()` 는 **기기에서 GPU 초기화가 실패해도 CPU 로 내려가 주지 않습니다**(OpenCL 이
@@ -71,6 +78,27 @@ engine.close(chat)
 engine.generate(prompt, attempt = 0)   // 재현되는, 지금까지 재 온 그 답
 engine.generate(prompt, attempt = 1)   // 다른 표본
 ```
+
+### 호출마다 다르게
+
+요약은 결정론적으로, 대화는 자유롭게 — 엔진을 둘 둘 필요 없습니다.
+
+```kotlin
+engine.generate(prompt, sampling = Sampling(temperature = 0.0), maxChars = 300)
+engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // 대화 단위로 고정됩니다
+```
+
+### 수명
+
+- `LlmEngine` 은 **앱에 하나**입니다(엔진이 GB 단위라). DI 를 쓰면 싱글턴으로.
+- `Chat` 은 화면이 사라질 때 `engine.close(chat)`. 모델을 바꾸면(`useModel`) 열려 있던 `Chat` 은
+  다음 `send` 에서 `StaleModelException` 을 던집니다 — 새 대화를 여세요.
+- 엔진의 주인이 죽을 때 `engine.close()`.
+- 사다리 여섯 칸이 **전부** 실패하면 `generate`/`startConversation` 이 마지막 예외를 던집니다.
+  그 기기는 이 모델을 못 돌리는 것이니 `device-tier` 의 `UNSUPPORTED` 와 같게 다루세요.
+  `EngineEvents.onEngineBuildAttemptFailed` 로 어느 칸이 왜 실패했는지 받을 수 있습니다.
+- 런타임을 만지는 모든 호출은 넘긴 `ioDispatcher` 에서 돕니다 — `useModel`·해제·모든 `EngineEvents` 콜백까지.
+  UI 를 만지려면 메인으로 직접 옮기세요.
 
 ### 무슨 일이 있었는지 말해 줍니다 — 확실히 아는 것만
 

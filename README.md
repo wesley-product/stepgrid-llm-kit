@@ -26,8 +26,16 @@ dependencies {
 }
 ```
 
+> **Status:** `0.1.0` is being prepared and is **not on Maven Central yet**. Until it is, clone this
+> repository next to yours and pull it in with `includeBuild` in `settings.gradle.kts`. This note
+> disappears when the release lands.
+
 `engine` pulls LiteRT-LM in as an `api` dependency. minSdk 26. No consumer ProGuard rules are
 needed — the library uses no reflection or serialization, so R8 keeps exactly what you call.
+
+**You bring the model file.** The library only ever asks for a path. Gemma models in LiteRT-LM
+format (`.litertlm`) are documented at [LiteRT-LM](https://developers.google.com/edge/litert-lm)
+and published under `litert-community` on Hugging Face; checking each model's license is on you.
 
 ## `engine`
 
@@ -73,12 +81,33 @@ engine.generate(prompt, attempt = 0)   // reproducible, the answer you measured
 engine.generate(prompt, attempt = 1)   // a different sample
 ```
 
+### Per call, not per engine
+
+Deterministic summaries and a chatty assistant from the same engine — no second instance:
+
+```kotlin
+engine.generate(prompt, sampling = Sampling(temperature = 0.0), maxChars = 300)
+engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // fixed for that conversation
+```
+
+### Lifecycle
+
+- **One `LlmEngine` per app.** The model is gigabytes; with DI, make it a singleton.
+- `engine.close(chat)` when the screen that owns the chat goes away. After `useModel()` switches
+  models, any open `Chat` throws `StaleModelException` on its next `send` — open a new one.
+- `engine.close()` when the engine's owner is destroyed.
+- If **every** rung of the ladder fails, `generate` / `startConversation` throw the last cause. That
+  device cannot run this model: treat it like `device-tier`'s `UNSUPPORTED`. `EngineEvents.onEngineBuildAttemptFailed`
+  tells you which rung failed and why.
+- Everything that touches the runtime runs on the `ioDispatcher` you pass — including `useModel`,
+  teardown, and every `EngineEvents` callback. Hop to the main thread yourself for UI.
+
 ### It tells you what happened — and only what it knows
 
 | | What you get | How it is known |
 |---|---|---|
 | `engine.currentEngine()` | `EngineInfo` — the backend and context cap that *actually* came up, which ladder rung, cold-start ms, memory delta | the rung that succeeded; a clock; your `memoryProbe` |
-| `engine.lastGeneration()` | `GenerationStats` — ms to first token, total ms, chars, chunks, chars/s, whether the output cap hit | measured around each generation |
+| `engine.lastGeneration()` | `GenerationStats` — ms to first token, total ms, chars, chunks, chars/s, whether the output cap hit | measured around each generation, counting only what you received |
 | `chat.usage()` | `ContextUsage` — turns, chars in/out, token counts, fraction of the window used | chars are exact; **tokens only if you supply a `TokenCounter`, otherwise `null`** |
 
 Characters are not tokens, and the ratio between them depends on the language and the text.
@@ -104,7 +133,7 @@ reason each value was chosen; if you run a different model, expect to change the
 ```kotlin
 when (tierOf(readDeviceSpecs(context))) {
     ModelTier.UNSUPPORTED -> explainAndStop()
-    ModelTier.LITE        -> download(smallModel)
+    ModelTier.LITE        -> download(smallModel)     // your ids, your files
     ModelTier.STANDARD    -> download(mediumModel)
     ModelTier.PRO         -> download(largeModel)
 }
@@ -113,7 +142,7 @@ when (tierOf(readDeviceSpecs(context))) {
 Two axes are judged together — chip class and RAM/cores — because neither is trustworthy alone:
 RAM says an 8 GB budget phone beats a 6 GB flagship; the chip alone puts a big model on a good
 chip with too little RAM. Thresholds are parameters (`TierThresholds`); the defaults assume a
-4B-INT4 / 1.5B / 0.6B lineup.
+4B-INT4 / 1.5B / 0.6B lineup. With a single model, use it as a gate: anything but `UNSUPPORTED`.
 
 Android has no API that says how fast a chip is — only a name string — so `classifyChip` is a
 table of known patterns, and unknown chips are capped at `STANDARD`: guessing low costs a better
@@ -141,6 +170,7 @@ FileOutputStream(target, plan.append).use { conn.inputStream.copyTo(it) }
 
 `plan.total` exists because a 206 reports only the *remaining* length. Use it as the total and a
 nearly finished download shows 0% — to the user, exactly the restart resume was meant to avoid.
+One plan per file; a multi-file model is just this, once per file.
 
 ## Design rules
 

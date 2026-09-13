@@ -29,12 +29,13 @@ public data class EngineInfo(
 
 /**
  * One generation, measured. Produced for every [LlmEngine.generate], [LlmEngine.generateStream],
- * [LlmEngine.send] and [LlmEngine.sendStream].
+ * [LlmEngine.send] and [LlmEngine.sendStream]. Counts what the caller actually received: a chunk
+ * that crossed the output cap is neither emitted nor counted.
  *
  * @property firstTokenMillis Time until the first chunk arrived — what the user feels as latency.
  *   `null` if nothing was emitted.
- * @property chars Length of the final text.
- * @property emissions How many chunks the runtime handed over (1 for non-streamed calls).
+ * @property chars Length of the final delivered text.
+ * @property emissions How many chunks were delivered (1 for non-streamed calls).
  * @property truncatedByCap Whether the client-side character cap stopped the stream.
  */
 public data class GenerationStats(
@@ -49,11 +50,11 @@ public data class GenerationStats(
 }
 
 /**
- * Records a generation as it happens. Pure: the clock is injected so it can be tested without waiting.
- * One recorder per generation; [finish] may be called once.
+ * Records a generation as it happens. Pure: the clock is injected so it can be tested without
+ * waiting. One recorder per generation; [finish] is called once, by the engine.
  */
-public class StatsRecorder(
-    public val attempt: Int,
+internal class StatsRecorder(
+    val attempt: Int,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val startedAt = now()
@@ -61,20 +62,20 @@ public class StatsRecorder(
     private var emissions = 0
     private var chars = 0
 
-    /** Call with the accumulated text after each chunk. */
-    public fun emission(textSoFar: String) {
+    /** Call with the accumulated text after each *delivered* chunk. */
+    fun emission(textSoFar: String) {
         if (firstAt == null) firstAt = now()
         emissions++
         chars = textSoFar.length
     }
 
-    public fun finish(maxChars: Int): GenerationStats = GenerationStats(
+    fun finish(truncatedByCap: Boolean): GenerationStats = GenerationStats(
         attempt = attempt,
         firstTokenMillis = firstAt?.let { it - startedAt },
         totalMillis = now() - startedAt,
         chars = chars,
         emissions = emissions,
-        truncatedByCap = chars >= maxChars,
+        truncatedByCap = truncatedByCap,
     )
 }
 
@@ -112,8 +113,12 @@ public data class ContextUsage(
     }
 }
 
-/** Mutable side of [ContextUsage]; one per chat. Not thread-safe on its own — the engine serializes access. */
-public class ContextUsageTracker(
+/**
+ * Mutable side of [ContextUsage]; one per chat. Writes happen on the engine's dispatcher under its
+ * mutex; [snapshot] may be called from any thread, so all three are synchronized — a snapshot is
+ * never a mix of two turns.
+ */
+internal class ContextUsageTracker(
     private val maxTokens: Int?,
     private val counter: TokenCounter?,
 ) {
@@ -123,18 +128,21 @@ public class ContextUsageTracker(
     private var tokensIn = 0
     private var tokensOut = 0
 
-    public fun addInput(text: String) {
+    @Synchronized
+    fun addInput(text: String) {
         charsIn += text.length
         if (counter != null) tokensIn += counter.count(text)
     }
 
-    public fun addOutput(text: String) {
+    @Synchronized
+    fun addOutput(text: String) {
         turns++
         charsOut += text.length
         if (counter != null) tokensOut += counter.count(text)
     }
 
-    public fun snapshot(): ContextUsage = ContextUsage(
+    @Synchronized
+    fun snapshot(): ContextUsage = ContextUsage(
         turns = turns,
         charsIn = charsIn,
         charsOut = charsOut,
@@ -145,11 +153,14 @@ public class ContextUsageTracker(
 }
 
 /** Why an engine was torn down. */
-public enum class ReleaseReason { MODEL_SWITCHED, MODEL_FORGOTTEN }
+public enum class ReleaseReason { MODEL_SWITCHED, MODEL_FORGOTTEN, CLOSED }
 
 /**
  * Callbacks for anyone who wants to watch the engine — telemetry, a debug overlay, logs. All
- * methods default to nothing, so implement only what you need. Called on the engine's dispatcher.
+ * methods default to nothing, so implement only what you need.
+ *
+ * Every callback is invoked on the engine's dispatcher (the `ioDispatcher` given to [LlmEngine]),
+ * including [onGeneration] after a streamed reply. Hop to the main thread yourself if you touch UI.
  */
 public interface EngineEvents {
     public fun onEngineBuilt(info: EngineInfo) {}
