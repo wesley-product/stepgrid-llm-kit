@@ -169,9 +169,9 @@ class DrainTest {
 
     @Test
     fun `a runtime that ignores the stop request is let go instead of holding the engine`() = runTest {
-        val warnings = mutableListOf<String>()
+        var quarantines = 0
         val events = object : EngineEvents {
-            override fun onWarning(message: String, cause: Throwable?) { warnings.add(message) }
+            override fun onEngineQuarantined(info: EngineInfo?, graceMillis: Long) { quarantines++ }
         }
         val e = engine(events, GenerationLimits(stopGraceMillis = 2_000))
 
@@ -188,10 +188,7 @@ class DrainTest {
         assertTrue(outcome.abandoned, "waiting forever is what we are here to prevent")
         assertTrue(outcome.capped)
         assertEquals(2_000L, outcome.stopWaitMillis, "the wait is reported, not hidden")
-        assertTrue(
-            warnings.any { "quarantined" in it },
-            "giving up on a runtime must be said out loud, not swallowed: $warnings",
-        )
+        assertEquals(1, quarantines, "giving up on a runtime must be said out loud, not swallowed")
     }
 
     @Test
@@ -258,5 +255,57 @@ class DrainTest {
     fun `a grace period of zero is refused rather than abandoning every capped reply`() {
         val t = runCatching { GenerationLimits(stopGraceMillis = 0) }.exceptionOrNull()
         assertTrue(t is IllegalArgumentException, "was $t")
+    }
+
+    // ---- the state is visible from outside, not inferred ----------------------------------------
+
+    @Test
+    fun `a quarantined engine says so instead of looking merely unready`() = runTest {
+        val e = engine(limits = GenerationLimits(stopGraceMillis = 1_000))
+        assertEquals(EngineState.OPEN, e.state())
+
+        e.drain(source = flow { emit("1234567890"); awaitCancellation() }, maxChars = 4, stop = { }) { }
+
+        assertEquals(EngineState.STUCK, e.state())
+        assertFalse(e.isClosed(), "nobody closed it — reading this as CLOSED would pick the wrong recovery")
+        assertFalse(e.isReady())
+        assertNull(e.currentEngine(), "nothing usable is up, whatever is still resident")
+    }
+
+    @Test
+    fun `closing a quarantined engine reports CLOSED, not STUCK`() = runTest {
+        val e = engine(limits = GenerationLimits(stopGraceMillis = 1_000))
+        e.drain(source = flow { emit("1234567890"); awaitCancellation() }, maxChars = 4, stop = { }) { }
+        e.close()
+        assertEquals(EngineState.CLOSED, e.state(), "an explicit close is the stronger fact")
+    }
+
+    @Test
+    fun `giving up on a runtime is a callback, not just a log line`() = runTest {
+        var graces = mutableListOf<Long>()
+        val events = object : EngineEvents {
+            override fun onEngineQuarantined(info: EngineInfo?, graceMillis: Long) { graces.add(graceMillis) }
+        }
+        val e = engine(events, GenerationLimits(stopGraceMillis = 3_000))
+
+        e.drain(source = flow { emit("1234567890"); awaitCancellation() }, maxChars = 4, stop = { }) { }
+
+        // The host has a decision to make here — stop generating on-device, or restart — and a
+        // warning string is not something it can act on.
+        assertEquals(listOf(3_000L), graces)
+    }
+
+    @Test
+    fun `a runtime that behaves never reaches the host as a quarantine`() = runTest {
+        var quarantines = 0
+        val events = object : EngineEvents {
+            override fun onEngineQuarantined(info: EngineInfo?, graceMillis: Long) { quarantines++ }
+        }
+        val e = engine(events)
+
+        e.drain(source = flowOf("hi"), maxChars = 1_000, stop = { }) { }
+
+        assertEquals(0, quarantines)
+        assertEquals(EngineState.OPEN, e.state())
     }
 }

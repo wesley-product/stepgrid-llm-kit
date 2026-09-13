@@ -171,6 +171,28 @@ public enum class ReleaseReason { MODEL_SWITCHED, MODEL_FORGOTTEN, CLOSED }
  * Every callback is invoked on the engine's dispatcher (the `ioDispatcher` given to [LlmEngine]),
  * including [onGeneration] after a streamed reply. Hop to the main thread yourself if you touch UI.
  */
+/**
+ * What an [LlmEngine] is right now.
+ *
+ * [STUCK] exists because it is not a shade of the other two: the instance is not closed — nobody
+ * asked it to be — yet it refuses work, and the recovery it needs is the opposite of a reopen.
+ */
+public enum class EngineState {
+    /** Usable. Whether a generation would actually run also depends on `isReady()`. */
+    OPEN,
+
+    /**
+     * A runtime ignored a stop request and was abandoned. Every call throws
+     * `LlmEngine.EngineStuckException`, and the native memory it held stays resident for the life of
+     * the process. Stop using on-device generation here, or restart the process — do not keep
+     * building replacements.
+     */
+    STUCK,
+
+    /** `close()` was called. Every generating or model-changing call throws. */
+    CLOSED,
+}
+
 public interface EngineEvents {
     /** An engine came up. [info] says on which rung, how long it took and what it cost. */
     public fun onEngineBuilt(info: EngineInfo) {}
@@ -184,6 +206,16 @@ public interface EngineEvents {
 
     /** A generation finished (normally or by cancellation). Not called for calls that failed before producing anything. */
     public fun onGeneration(stats: GenerationStats) {}
+
+    /**
+     * A runtime ignored a stop request for [graceMillis] and the engine was abandoned.
+     *
+     * Unlike everything else here this is not an observation, it is a decision to make: [info] is
+     * the engine that was left allocated (`null` if none had been built), and its memory does not
+     * come back until the process ends. Turn on-device generation off or restart — building another
+     * engine on top of it is how one abandoned model becomes an OOM kill.
+     */
+    public fun onEngineQuarantined(info: EngineInfo?, graceMillis: Long) {}
 
     /** Something recoverable went wrong: a fallback rung, a failed warm-up, a failed chat close. */
     public fun onWarning(message: String, cause: Throwable?) {}

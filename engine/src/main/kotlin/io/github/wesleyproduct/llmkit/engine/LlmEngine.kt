@@ -84,6 +84,9 @@ public class LlmEngine(
      *  to stop. The native side may still be running inside this engine, so it is quarantined
      *  rather than freed — see [EngineStuckException]. */
     @Volatile private var stuck = false
+    /** What the quarantined engine was, kept only so [EngineEvents.onEngineQuarantined] can say how
+     *  much native memory was left behind. */
+    @Volatile private var quarantined: EngineInfo? = null
     @Volatile private var current: String? = null
     @Volatile private var info: EngineInfo? = null
     @Volatile private var lastStats: GenerationStats? = null
@@ -141,8 +144,14 @@ public class LlmEngine(
      *
      * A generation may still be running inside this engine's native memory, so the engine is dead to
      * us but must not be freed: releasing it now could pull memory out from under a live callback.
-     * It is left allocated on purpose. Build a new [LlmEngine]; the old one's memory comes back when
-     * the process does.
+     * It is left allocated on purpose, and stays that way until the process ends.
+     *
+     * **So "just build a new one" is not a recovery policy.** These models are gigabytes; two or
+     * three abandoned engines in one process is an OOM kill. Treat this the way you would treat
+     * `device-tier`'s `UNSUPPORTED`: turn the on-device model off for the rest of this process — or
+     * restart the process — rather than rebuilding into memory you can no longer get back.
+     * [EngineEvents.onEngineQuarantined] is the hook for that decision and tells you what was left
+     * behind; one is survivable, a habit is not.
      */
     public class EngineStuckException : IllegalStateException(
         "the runtime ignored a stop request; this LlmEngine is quarantined — build a new one",
@@ -158,7 +167,24 @@ public class LlmEngine(
 
     // ---- observability -----------------------------------------------------------------------
 
-    /** The engine that is actually up, or `null` before the first build / after a teardown. */
+    /**
+     * What this engine is, as one answer.
+     *
+     * Three separate predicates used to leave a caller to work it out, and quarantine read as
+     * "not closed, but not ready either" — which is exactly the state where picking the wrong
+     * recovery does damage. Ask here instead.
+     */
+    public fun state(): EngineState = when {
+        closed -> EngineState.CLOSED
+        stuck -> EngineState.STUCK
+        else -> EngineState.OPEN
+    }
+
+    /**
+     * The engine that is actually up, or `null` before the first build, after a teardown, and after
+     * a quarantine — a quarantined engine is not up in any sense a caller can use, whatever is still
+     * resident. [EngineEvents.onEngineQuarantined] reports what it cost on the way out.
+     */
     public fun currentEngine(): EngineInfo? = info
 
     /** Stats of the most recent finished generation, if any. */
@@ -182,13 +208,15 @@ public class LlmEngine(
         }
     }
 
-    /** Whether a model is selected and its weights are on disk. `false` once closed. */
+    /** Whether a model is selected and its weights are on disk. `false` once [close]d, and `false`
+     *  once quarantined — see [state] to tell those apart. */
     public fun isReady(): Boolean = !closed && !stuck && current?.let { models.pathOf(it) } != null
 
     /** The model currently selected (loaded or not). Read without the lock — it is only a hint. */
     public fun currentModel(): String? = current
 
-    /** Whether [close] has been called. A closed engine refuses every further call. */
+    /** Whether [close] has been called. Note a quarantined engine also refuses work while this
+     *  stays `false`; [state] is the one that distinguishes them. */
     public fun isClosed(): Boolean = closed
 
     /**
@@ -246,7 +274,15 @@ public class LlmEngine(
             // A generation we gave up waiting for may still be running in there. Freeing it now
             // could pull native memory out from under a live callback, so we leak it on purpose: a
             // leaked engine is a bounded cost that ends with the process, a use-after-free is not.
-            events.onWarning("engine quarantined while the runtime was still generating — not freeing it", null)
+            events.onWarning(
+                "engine quarantined while the runtime was still generating — not freeing it" +
+                    (
+                        quarantined?.memoryDelta
+                            ?.let { " (~" + it.nativeHeapBytes / (1024 * 1024) + "MB of native heap stays resident)" }
+                            ?: ""
+                        ),
+                null,
+            )
         } else {
             engine?.close()
         }
@@ -582,14 +618,7 @@ public class LlmEngine(
             watchdog.cancel()
         }
 
-        if (abandoned) {
-            stuck = true
-            events.onWarning(
-                "the runtime ignored a stop request for " + limits.stopGraceMillis + "ms — this LlmEngine " +
-                    "is quarantined and its native memory deliberately leaked; build a new one",
-                null,
-            )
-        }
+        if (abandoned) quarantine()
         failure?.let { throw it }
         return StreamOutcome(capped, downstream, stopWait, abandoned)
     }
@@ -599,6 +628,21 @@ public class LlmEngine(
      * body is empty, so cancelling the collector detaches from the stream without stopping the work
      * behind it. This only *asks*; [drain] is what waits. Never throws — we are already unwinding.
      */
+    /**
+     * Give up on a runtime that ignored the stop request.
+     *
+     * [info] is cleared because nothing usable is up any more, but the native engine is deliberately
+     * left allocated — see [EngineStuckException]. The host is told through a callback of its own
+     * rather than a warning string, because this is a decision it has to act on, not a log line.
+     */
+    private fun quarantine() {
+        val left = info
+        stuck = true
+        quarantined = left
+        info = null
+        events.onEngineQuarantined(left, limits.stopGraceMillis)
+    }
+
     private fun stopGenerating(conversation: Conversation) {
         runCatching { conversation.cancelProcess() }
             .onFailure { events.onWarning("cancelProcess failed", it) }

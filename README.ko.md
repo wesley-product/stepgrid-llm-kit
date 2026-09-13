@@ -178,6 +178,14 @@ engine.startConversation(system, sampling = chatty)   // 대화 단위로 고정
   않습니다. 네이티브 콜백이 아직 그 메모리에 쓰고 있을 수 있어서 일부러 붙잡아 둔 채 버리고, 이후
   모든 호출은 `EngineStuckException` 입니다. 새 `LlmEngine` 을 만드세요. 메모리는 프로세스와 함께
   돌아옵니다. **새는 엔진의 대가는 유한하고, use-after-free 의 대가는 그렇지 않습니다.**
+- **격리는 재시도가 아닙니다.** 남겨둔 메모리는 프로세스가 끝나기 전에는 안 돌아오고, 이 모델들은
+  기가바이트 단위입니다 — 한 프로세스에 버려진 엔진이 둘셋이면 OOM 으로 죽습니다. 그래서
+  `EngineStuckException` 은 「하나 더 만들라」는 뜻이 아닙니다. `EngineEvents.onEngineQuarantined`
+  를 받아서 `device-tier` 의 `UNSUPPORTED` 와 같게 다루세요 — 이 프로세스에서는 온디바이스 생성을
+  끄거나, 프로세스를 다시 시작하는 겁니다. **한 번은 버틸 수 있지만 버릇이 되면 못 버팁니다.**
+- `engine.state()` 가 `OPEN`/`STUCK`/`CLOSED` 를 한 번에 답합니다. 격리된 엔진은 *닫힌 게 아닙니다*
+  — 아무도 닫으라고 안 했으니까요. 그래서 `isClosed()` 는 `false` 인데 `isReady()` 는 `false` 가
+  되고 `currentEngine()` 은 `null` 이 됩니다. 조각으로 짜맞추지 말고 `state()` 에 물으세요.
 - `chat.isUsable()` 은 대화가 죽는 세 가지 이유를 모두 반영합니다 — 중간에 끊겼거나, 밑에서 모델이
   바뀌었거나, 엔진이 닫혔거나 격리됐거나. 그래서 다음 `send()` 가 던질 것과 답이 어긋나지 않습니다.
 - `engine.close()` 는 되돌릴 수 없습니다. 이후 **생성하거나 모델을 바꾸는** 호출은 모두

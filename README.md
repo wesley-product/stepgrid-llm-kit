@@ -179,6 +179,14 @@ engine.startConversation(system, sampling = chatty)   // fixed for that conversa
   writing into that memory, so it is left allocated on purpose and every later call throws
   `EngineStuckException`. Build a new `LlmEngine`; the memory comes back with the process. A leaked
   engine is a bounded cost. A use-after-free is not.
+- **Quarantine is not a retry.** The leaked memory does not come back until the process does, and
+  these models are gigabytes — two or three abandoned engines in one process is an OOM kill. So
+  `EngineStuckException` is not "build another one": handle `EngineEvents.onEngineQuarantined` and
+  turn on-device generation off for the rest of the process, or restart it, the same way you would
+  treat `device-tier`'s `UNSUPPORTED`. One abandoned engine is survivable; a habit of them is not.
+- `engine.state()` is `OPEN` / `STUCK` / `CLOSED` in one answer. A quarantined engine is *not*
+  closed — nobody asked it to be — so `isClosed()` stays `false` while `isReady()` goes `false` and
+  `currentEngine()` goes `null`. Ask `state()` rather than assembling it from the predicates.
 - `chat.isUsable()` answers for all three reasons a conversation dies — interrupted part-way, model
   switched underneath it, engine closed or quarantined — so it agrees with what the next `send()`
   would throw instead of only knowing about the first.

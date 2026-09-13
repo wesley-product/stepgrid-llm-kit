@@ -41,6 +41,10 @@ nonsense, and it did not.
     the engine forever and every call queued behind it; past the grace the engine is quarantined
     (`EngineStuckException`) and deliberately **not** freed, because a native callback may still be
     running in it.
+  - `EngineState` (`OPEN` / `STUCK` / `CLOSED`) via `engine.state()`, and an
+    `EngineEvents.onEngineQuarantined` callback carrying the engine that was left allocated. A
+    quarantined engine is not a closed one, and the leak does not come back until the process ends —
+    so the recovery is to stop generating on-device or restart, never to build a replacement.
   - `Chat.isUsable()` reflects all three reasons a conversation dies — interrupted, stale model,
     closed or quarantined engine — instead of only the first.
   - The output cap applies to `send()` too, not just the streamed paths: a model that never
