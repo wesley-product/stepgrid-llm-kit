@@ -45,6 +45,13 @@ public data class GenerationStats(
     val chars: Int,
     val emissions: Int,
     val truncatedByCap: Boolean,
+    /**
+     * How long the runtime took to wind down after being asked to stop, or `null` when it was never
+     * asked (it finished on its own). Worth watching: it is time the engine is held and every queued
+     * call waits with it. If it ever equals `GenerationLimits.stopGraceMillis` the runtime did not
+     * stop at all, and the engine was quarantined.
+     */
+    val stopWaitMillis: Long? = null,
 ) {
     val charsPerSecond: Double get() = if (totalMillis <= 0) 0.0 else chars * 1000.0 / totalMillis
 }
@@ -69,13 +76,14 @@ internal class StatsRecorder(
         chars = textSoFar.length
     }
 
-    fun finish(truncatedByCap: Boolean): GenerationStats = GenerationStats(
+    fun finish(truncatedByCap: Boolean, stopWaitMillis: Long? = null): GenerationStats = GenerationStats(
         attempt = attempt,
         firstTokenMillis = firstAt?.let { it - startedAt },
         totalMillis = now() - startedAt,
         chars = chars,
         emissions = emissions,
         truncatedByCap = truncatedByCap,
+        stopWaitMillis = stopWaitMillis,
     )
 }
 

@@ -1,6 +1,7 @@
 package io.github.wesleyproduct.llmkit.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -9,6 +10,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -161,5 +163,100 @@ class DrainTest {
         ) { seen.add(it) }
 
         assertEquals(listOf("Hel", "Hello"), seen, "cumulative chunks replace, they do not append")
+    }
+
+    // ---- the stop request has a clock on it ----------------------------------------------------
+
+    @Test
+    fun `a runtime that ignores the stop request is let go instead of holding the engine`() = runTest {
+        val warnings = mutableListOf<String>()
+        val events = object : EngineEvents {
+            override fun onWarning(message: String, cause: Throwable?) { warnings.add(message) }
+        }
+        val e = engine(events, GenerationLimits(stopGraceMillis = 2_000))
+
+        // Trips the cap, then never ends — exactly the runtime that drops cancelProcess on the floor.
+        val outcome = e.drain(
+            source = flow {
+                emit("1234567890")
+                awaitCancellation()
+            },
+            maxChars = 4,
+            stop = { },
+        ) { }
+
+        assertTrue(outcome.abandoned, "waiting forever is what we are here to prevent")
+        assertTrue(outcome.capped)
+        assertEquals(2_000L, outcome.stopWaitMillis, "the wait is reported, not hidden")
+        assertTrue(
+            warnings.any { "quarantined" in it },
+            "giving up on a runtime must be said out loud, not swallowed: $warnings",
+        )
+    }
+
+    @Test
+    fun `an abandoned engine refuses further work rather than half-living`() = runTest {
+        val e = engine(limits = GenerationLimits(stopGraceMillis = 1_000))
+        e.drain(source = flow { emit("1234567890"); awaitCancellation() }, maxChars = 4, stop = { }) { }
+
+        assertFalse(e.isReady(), "a quarantined engine is not ready for anything")
+        listOf(
+            runCatching { e.useModel("m") }.exceptionOrNull(),
+            runCatching { e.generate("hi") }.exceptionOrNull(),
+            runCatching { e.startConversation("sys") }.exceptionOrNull(),
+        ).forEachIndexed { i, t ->
+            assertTrue(t is LlmEngine.EngineStuckException, "entry point #$i threw $t")
+        }
+    }
+
+    @Test
+    fun `closing an abandoned engine does not free the native side`() = runTest {
+        val warnings = mutableListOf<String>()
+        val events = object : EngineEvents {
+            override fun onWarning(message: String, cause: Throwable?) { warnings.add(message) }
+        }
+        val e = engine(events, GenerationLimits(stopGraceMillis = 1_000))
+        e.drain(source = flow { emit("1234567890"); awaitCancellation() }, maxChars = 4, stop = { }) { }
+        warnings.clear()
+
+        e.close()   // must not throw, and must not reach the runtime
+
+        assertTrue(e.isClosed())
+        assertTrue(
+            warnings.any { "not freeing it" in it },
+            "a deliberate leak is a decision; it has to be reported: $warnings",
+        )
+    }
+
+    @Test
+    fun `a runtime that stops promptly is neither abandoned nor quarantined`() = runTest {
+        val e = engine(limits = GenerationLimits(stopGraceMillis = 10_000))
+        val outcome = e.drain(
+            source = stoppedAfter("1234567890", ending = CancellationException("cancelProcess")),
+            maxChars = 4,
+            stop = { },
+        ) { }
+
+        assertTrue(outcome.capped)
+        assertFalse(outcome.abandoned)
+        assertNotNull(outcome.stopWaitMillis, "how long it took to stop is worth knowing even when it did")
+        assertFalse(e.isClosed())
+        assertNull(
+            runCatching { e.useModel("m") }.exceptionOrNull(),
+            "a runtime that behaved must not cost the caller its engine",
+        )
+    }
+
+    @Test
+    fun `a stream that ends on its own reports no stop wait at all`() = runTest {
+        val outcome = engine().drain(source = flowOf("hi"), maxChars = 1_000, stop = { }) { }
+        assertNull(outcome.stopWaitMillis, "nobody was asked to stop, so there is no wait to report")
+        assertFalse(outcome.abandoned)
+    }
+
+    @Test
+    fun `a grace period of zero is refused rather than abandoning every capped reply`() {
+        val t = runCatching { GenerationLimits(stopGraceMillis = 0) }.exceptionOrNull()
+        assertTrue(t is IllegalArgumentException, "was $t")
     }
 }

@@ -29,6 +29,10 @@ public data class Sampling(
  *   this is what stops a repetition spiral from holding the engine for 30s+.
  * @property seedStride Distance between seeds of successive retries. Adjacent seeds (0, 1) were
  *   observed to yield byte-identical output; far-apart primes don't.
+ * @property stopGraceMillis How long to wait for the runtime to wind down after being asked to
+ *   stop. The engine is held for that wait, so every queued call waits with it; past the grace
+ *   the engine is abandoned and quarantined rather than freed, because a native callback may
+ *   still be running inside it. Must be positive.
  * @property streamMode Whether streamed chunks are deltas or cumulative snapshots. The default
  *   matches LiteRT-LM 0.13.x; change it only if your runtime differs. See [StreamMode] for why
  *   this is stated rather than detected.
@@ -38,9 +42,15 @@ public data class GenerationLimits(
     val roomyContextTokens: Int = 4096,
     val maxGenChars: Int = 1000,
     val seedStride: Int = 7919,
+    val stopGraceMillis: Long = 5_000,
     val sampling: Sampling = Sampling(),
     val streamMode: StreamMode = StreamMode.DELTA,
-)
+) {
+    init {
+        // Zero would abandon the engine on every cap hit; negative means nothing to withTimeoutOrNull.
+        require(stopGraceMillis > 0) { "stopGraceMillis must be positive, was " + stopGraceMillis }
+    }
+}
 
 /**
  * Sampling for the n-th attempt at the same prompt.

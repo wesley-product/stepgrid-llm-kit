@@ -10,6 +10,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * One shared on-device LLM engine over LiteRT-LM, serialized behind a single mutex.
@@ -78,12 +80,16 @@ public class LlmEngine(
     // Touched only under engineMutex, except `current`, `info` and `lastStats`, read free as hints.
     private var engine: Engine? = null
     @Volatile private var closed = false
+    /** Set when a generation outlived [GenerationLimits.stopGraceMillis] after we asked the runtime
+     *  to stop. The native side may still be running inside this engine, so it is quarantined
+     *  rather than freed — see [EngineStuckException]. */
+    @Volatile private var stuck = false
     @Volatile private var current: String? = null
     @Volatile private var info: EngineInfo? = null
     @Volatile private var lastStats: GenerationStats? = null
     /** Bumped on every engine teardown and stamped onto each [Chat] handed out, so a conversation
      *  from a torn-down engine is detectable instead of being a dangling native pointer. */
-    private var epoch = 0
+    @Volatile private var epoch = 0
 
     // Closing a chat isn't suspending (callers close from lifecycle teardown), so the native close
     // is handed to this scope to run under engineMutex like every other engine-touching call.
@@ -98,6 +104,7 @@ public class LlmEngine(
         internal val conversation: Conversation,
         internal val epoch: Int,
         internal val tracker: ContextUsageTracker,
+        private val owner: LlmEngine,
     ) {
         /** Set once a reply was stopped part-way — by the output cap or by a cancelled collector. */
         @Volatile internal var interrupted: Boolean = false
@@ -107,11 +114,19 @@ public class LlmEngine(
         public fun usage(): ContextUsage = tracker.snapshot()
 
         /**
-         * Whether this conversation can still be used. Becomes `false` after a reply was stopped
-         * part-way: the runtime does not roll its history back, so the model's context now holds a
-         * half-finished assistant turn and every later turn would be conditioned on it.
+         * Whether [send] or [sendStream] on this conversation would actually work.
+         *
+         * `false` for any of the three reasons a chat dies, so that asking here agrees with what
+         * the next call would throw:
+         * - a reply was stopped part-way ([ChatInterruptedException]) — the runtime does not roll
+         *   its history back, so its context holds a half-finished assistant turn;
+         * - the model was switched or forgotten underneath it ([StaleModelException]);
+         * - the engine was closed ([EngineClosedException]) or quarantined ([EngineStuckException]).
+         *
+         * Either way the remedy is the same: open a new conversation — on a new [LlmEngine] if the
+         * old one is gone.
          */
-        public fun isUsable(): Boolean = !interrupted
+        public fun isUsable(): Boolean = owner.canContinue(this)
     }
 
     /** A [Chat] outlived the model it was opened on: its engine — and with it the conversation's
@@ -120,6 +135,18 @@ public class LlmEngine(
 
     /** The engine was [close]d. It cannot be reused; build a new [LlmEngine]. */
     public class EngineClosedException : IllegalStateException("this LlmEngine has been closed")
+
+    /**
+     * The runtime did not stop when it was asked to, and we stopped waiting for it.
+     *
+     * A generation may still be running inside this engine's native memory, so the engine is dead to
+     * us but must not be freed: releasing it now could pull memory out from under a live callback.
+     * It is left allocated on purpose. Build a new [LlmEngine]; the old one's memory comes back when
+     * the process does.
+     */
+    public class EngineStuckException : IllegalStateException(
+        "the runtime ignored a stop request; this LlmEngine is quarantined — build a new one",
+    )
 
     /**
      * A reply on this [Chat] was stopped part-way, so the runtime's history holds a half-finished
@@ -156,7 +183,7 @@ public class LlmEngine(
     }
 
     /** Whether a model is selected and its weights are on disk. `false` once closed. */
-    public fun isReady(): Boolean = !closed && current?.let { models.pathOf(it) } != null
+    public fun isReady(): Boolean = !closed && !stuck && current?.let { models.pathOf(it) } != null
 
     /** The model currently selected (loaded or not). Read without the lock — it is only a hint. */
     public fun currentModel(): String? = current
@@ -204,13 +231,25 @@ public class LlmEngine(
     /** Under [engineMutex]. */
     private fun ensureOpen() {
         if (closed) throw EngineClosedException()
+        if (stuck) throw EngineStuckException()
     }
+
+    /** Backs [Chat.isUsable]: it must answer with the same three reasons [sendStream] throws for. */
+    internal fun canContinue(chat: Chat): Boolean =
+        !closed && !stuck && chat.epoch == epoch && !chat.interrupted
 
     /** Under [engineMutex], on [ioDispatcher]. */
     private fun release(reason: ReleaseReason) {
         val had = engine != null
         val id = current
-        engine?.close()
+        if (stuck) {
+            // A generation we gave up waiting for may still be running in there. Freeing it now
+            // could pull native memory out from under a live callback, so we leak it on purpose: a
+            // leaked engine is a bounded cost that ends with the process, a use-after-free is not.
+            events.onWarning("engine quarantined while the runtime was still generating — not freeing it", null)
+        } else {
+            engine?.close()
+        }
         engine = null
         info = null
         epoch++
@@ -278,7 +317,7 @@ public class LlmEngine(
             .onEach { stats.emission(it) }
             .onCompletion { cause ->
                 if (cause == null || cause is CancellationException) {
-                    publish(stats.finish(truncatedByCap = outcome?.capped == true))
+                    publish(stats.finish(outcome?.capped == true, outcome?.stopWaitMillis))
                 }
             }
             .flowOn(ioDispatcher)   // everything above — including the stats callback — runs on the engine's dispatcher
@@ -306,7 +345,7 @@ public class LlmEngine(
             )
             val tracker = ContextUsageTracker(info?.maxTokens, tokenCounter)
             tracker.addInput(systemInstruction)
-            Chat(conversation, epoch, tracker)
+            Chat(conversation, epoch, tracker, this@LlmEngine)
         }
     }
 
@@ -382,7 +421,7 @@ public class LlmEngine(
             .onCompletion { cause ->
                 if (inputCounted && (cause == null || cause is CancellationException)) {
                     chat.tracker.addOutput(finalText)
-                    publish(stats.finish(truncatedByCap = outcome?.capped == true))
+                    publish(stats.finish(outcome?.capped == true, outcome?.stopWaitMillis))
                 }
             }
             .flowOn(ioDispatcher)
@@ -397,6 +436,10 @@ public class LlmEngine(
      * and is reported as such.
      */
     public fun close(chat: Chat) {
+        if (stuck) {
+            events.onWarning("close(chat) on a quarantined engine — leaving the native side alone", null)
+            return
+        }
         if (closed || !closeScope.isActive) {
             events.onWarning("close(chat) after the engine was closed — nothing to do", null)
             return
@@ -433,7 +476,14 @@ public class LlmEngine(
     // ---- internals ---------------------------------------------------------------------------
 
     /** What a streamed generation ended up doing. */
-    internal class StreamOutcome(val capped: Boolean, val downstream: Throwable?) {
+    internal class StreamOutcome(
+        val capped: Boolean,
+        val downstream: Throwable?,
+        /** How long the runtime took to wind down after being asked to stop; `null` if never asked. */
+        val stopWaitMillis: Long? = null,
+        /** We stopped waiting for it. The engine is quarantined. */
+        val abandoned: Boolean = false,
+    ) {
         /** The runtime was told to stop rather than being allowed to finish. */
         val stoppedEarly: Boolean get() = capped || downstream != null
     }
@@ -442,14 +492,22 @@ public class LlmEngine(
      * Run one generation to the end of the runtime's stream, delivering text through [emit] until
      * the cap trips or the collector goes away.
      *
-     * **It always waits for the runtime's stream to finish**, even when we stopped wanting the
-     * text. `cancelProcess()` returns `Unit` and promises nothing about when generation actually
-     * ends, so returning early would let the conversation — and the engine behind it — be closed
-     * while a native callback is still running. Draining under [NonCancellable] is what makes
-     * closing safe, and holding [engineMutex] throughout is what keeps the next request out.
+     * **It waits for the runtime's stream to finish**, even when we stopped wanting the text.
+     * `cancelProcess()` returns `Unit` and promises nothing about when generation actually ends, so
+     * returning early would let the conversation — and the engine behind it — be closed while a
+     * native callback is still running. Draining under [NonCancellable] is what makes closing safe,
+     * and holding [engineMutex] throughout is what keeps the next request out.
      *
-     * The cost is honest: after the cap or a cancellation this can still take as long as the
-     * runtime needs to wind down.
+     * **But it does not wait forever.** A runtime that drops the stop request would otherwise hold
+     * the mutex for good, and with it every later `send`, `useModel` and `close` — the user cancels
+     * and the app goes quiet instead. So the wait after a stop request is bounded by
+     * [GenerationLimits.stopGraceMillis]; past that we let go and quarantine the engine
+     * ([EngineStuckException]) rather than free memory a live callback may still be writing into.
+     * How long the wait took is reported in [GenerationStats.stopWaitMillis] either way.
+     *
+     * The bound covers the wait *after* we ask it to stop. A runtime that never emits anything at
+     * all is a different failure and is not bounded here — the output cap is what handles a runtime
+     * that talks forever.
      *
      * Takes raw chunks and a [stop] callback rather than the runtime's own types, so the one path
      * that cannot be exercised on a device — a stream that dies the instant it is told to stop —
@@ -464,37 +522,76 @@ public class LlmEngine(
         val acc = StreamAccumulator(limits.streamMode)
         var capped = false
         var downstream: Throwable? = null
+        var failure: Throwable? = null
         var stopRequested = false
-        withContext(NonCancellable) {
-            try {
-                source.collect { chunk ->
-                    val text = acc.push(chunk)
-                    if (stopRequested) return@collect                      // draining: read, deliver nothing
-                    if (text.length >= maxChars) {
-                        capped = true
-                        stopRequested = true
-                        stop()
-                        return@collect
-                    }
-                    try {
-                        emit(text)
-                    } catch (t: Throwable) {                               // collector gone, or cancelled
-                        downstream = t
-                        stopRequested = true
-                        stop()
-                    }
-                }
-            } catch (t: Throwable) {
-                // We asked the runtime to stop, so the stream ending abruptly IS the answer to that
-                // request — LiteRT-LM's callbackFlow most often ends it as a CancellationException.
-                // Letting it out here would throw away the outcome: the caller would never learn the
-                // reply was cut, and a Chat would go on looking usable with half an assistant turn
-                // already in its history. Only a stream we did NOT stop is a real failure.
-                if (t is Error || !stopRequested) throw t
-                events.onWarning("the runtime stream ended abruptly after cancelProcess", t)
-            }
+        var stopWait: Long? = null
+        var abandoned = false
+        val stopAskedAt = CompletableDeferred<Long>()
+
+        fun requestStop() {
+            if (stopRequested) return
+            stopRequested = true
+            stopAskedAt.complete(clock())
+            stop()
         }
-        return StreamOutcome(capped, downstream)
+
+        withContext(NonCancellable) {
+            // Reading and waiting are separate coroutines on purpose: the watchdog cannot put a
+            // clock on the reader if it *is* the reader.
+            val reader = launch {
+                try {
+                    source.collect { chunk ->
+                        val text = acc.push(chunk)
+                        if (stopRequested) return@collect                  // draining: read, deliver nothing
+                        if (text.length >= maxChars) {
+                            capped = true
+                            requestStop()
+                            return@collect
+                        }
+                        try {
+                            emit(text)
+                        } catch (t: Throwable) {                           // collector gone, or cancelled
+                            downstream = t
+                            requestStop()
+                        }
+                    }
+                } catch (t: Throwable) {
+                    // We asked the runtime to stop, so the stream ending abruptly IS the answer to
+                    // that request — LiteRT-LM's callbackFlow ends it as a CancellationException.
+                    // Letting it out here would throw away the outcome: the caller would never learn
+                    // the reply was cut, and a Chat would go on looking usable with half an
+                    // assistant turn already in its history. Only a stream we did NOT stop is a real
+                    // failure. Held rather than thrown so a failing reader cannot race the watchdog.
+                    if (t is Error || !stopRequested) failure = t
+                    else if (!abandoned) events.onWarning("the runtime stream ended abruptly after cancelProcess", t)
+                }
+            }
+            val watchdog = launch {
+                val askedAt = stopAskedAt.await()
+                if (withTimeoutOrNull(limits.stopGraceMillis) { reader.join() } != null) {
+                    stopWait = clock() - askedAt
+                } else {
+                    abandoned = true
+                    stopWait = limits.stopGraceMillis
+                    // Detaching only stops *us* reading. The native side may still be generating,
+                    // which is exactly why the engine is quarantined below instead of freed.
+                    reader.cancel()
+                }
+            }
+            reader.join()
+            watchdog.cancel()
+        }
+
+        if (abandoned) {
+            stuck = true
+            events.onWarning(
+                "the runtime ignored a stop request for " + limits.stopGraceMillis + "ms — this LlmEngine " +
+                    "is quarantined and its native memory deliberately leaked; build a new one",
+                null,
+            )
+        }
+        failure?.let { throw it }
+        return StreamOutcome(capped, downstream, stopWait, abandoned)
     }
 
     /**

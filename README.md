@@ -171,6 +171,17 @@ engine.startConversation(system, sampling = chatty)   // fixed for that conversa
 - Cancelling the collector of a streamed reply stops delivery, asks the runtime to stop generating,
   and only then releases the engine — so the next call never starts while the previous one is still
   running. (The runtime's own `Flow` does nothing on cancellation; this library asks explicitly.)
+- **That wait has a clock on it.** `cancelProcess()` promises nothing about when generation actually
+  ends, and a runtime that drops the request would hold the engine — and every call queued behind it
+  — for good; the user cancels and the app goes quiet. So the wait is bounded by
+  `GenerationLimits.stopGraceMillis` (5s by default) and reported as `GenerationStats.stopWaitMillis`
+  every time. Past the grace the engine is **quarantined**, not freed: a native callback may still be
+  writing into that memory, so it is left allocated on purpose and every later call throws
+  `EngineStuckException`. Build a new `LlmEngine`; the memory comes back with the process. A leaked
+  engine is a bounded cost. A use-after-free is not.
+- `chat.isUsable()` answers for all three reasons a conversation dies — interrupted part-way, model
+  switched underneath it, engine closed or quarantined — so it agrees with what the next `send()`
+  would throw instead of only knowing about the first.
 - `engine.close()` is final. Every later call that would generate or change the model throws
   `EngineClosedException`. The teardown paths stay quiet instead — `close(chat)` reports a warning
   and `warmUp()` does nothing — because they are called from code that is already going away.
