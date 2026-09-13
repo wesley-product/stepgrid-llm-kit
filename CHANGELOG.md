@@ -13,6 +13,8 @@ with LiteRT-LM; each piece exists because the app hit the problem it solves.
 
 ### Added
 
+- **`llm-kit`** — umbrella artifact: one dependency that brings in the three modules below.
+  Each module stays separately published for à-la-carte use.
 - **`engine`** — one shared LiteRT-LM engine behind a mutex.
   - GPU→CPU fallback ladder that also steps down the context size
     (GPU+4096 → CPU+4096 → GPU+2048 → CPU+2048 → GPU → CPU). LiteRT-LM does not fall back on its own.

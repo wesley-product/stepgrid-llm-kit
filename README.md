@@ -20,22 +20,21 @@ read Android or call the native runtime need a device.
 
 ```kotlin
 dependencies {
-    implementation("io.github.wesley-product:engine:0.1.0")
-    implementation("io.github.wesley-product:device-tier:0.1.0")
-    implementation("io.github.wesley-product:resume:0.1.0")
+    implementation("io.github.wesley-product:llm-kit:0.1.0")   // all three modules
 }
 ```
 
+Or pick modules individually — `engine`, `device-tier`, `resume` — under the same group and
+version. `resume` is pure JVM and needs no Android.
+
 > **Status:** `0.1.0` is being prepared and is **not on Maven Central yet**. Until it is, clone this
-> repository next to yours and let Gradle substitute the coordinates with the local build:
+> repository next to yours and let Gradle substitute the coordinate with the local build:
 >
 > ```kotlin
 > // settings.gradle.kts
 > includeBuild("../stepgrid-llm-kit") {
 >     dependencySubstitution {
->         substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
->         substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
->         substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
+>         substitute(module("io.github.wesley-product:llm-kit")).using(project(":llm-kit"))
 >     }
 > }
 > ```

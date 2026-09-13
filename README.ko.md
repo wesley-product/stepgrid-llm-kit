@@ -19,11 +19,12 @@
 
 ```kotlin
 dependencies {
-    implementation("io.github.wesley-product:engine:0.1.0")
-    implementation("io.github.wesley-product:device-tier:0.1.0")
-    implementation("io.github.wesley-product:resume:0.1.0")
+    implementation("io.github.wesley-product:llm-kit:0.1.0")   // 셋 전부
 }
 ```
+
+골라 쓰려면 개별 좌표도 있습니다 — `engine` · `device-tier` · `resume`. `resume` 은 순수 JVM 이라
+안드로이드 없이도 됩니다.
 
 `engine` 이 LiteRT-LM 을 `api` 로 끌고 옵니다. minSdk 26. 소비자용 ProGuard 규칙은 필요 없습니다 —
 리플렉션도 직렬화도 안 써서 R8 은 여러분이 부르는 것만 남깁니다.
@@ -35,9 +36,7 @@ dependencies {
 > // settings.gradle.kts
 > includeBuild("../stepgrid-llm-kit") {
 >     dependencySubstitution {
->         substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
->         substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
->         substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
+>         substitute(module("io.github.wesley-product:llm-kit")).using(project(":llm-kit"))
 >     }
 > }
 > ```
