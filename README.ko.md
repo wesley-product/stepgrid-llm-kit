@@ -29,8 +29,8 @@ dependencies {
 `engine` 이 LiteRT-LM 을 `api` 로 끌고 옵니다. minSdk 26. 소비자용 ProGuard 규칙은 필요 없습니다 —
 리플렉션도 직렬화도 안 써서 R8 은 여러분이 부르는 것만 남깁니다.
 
-> **상태:** `0.1.0` 은 준비 중이고 아직 Maven Central 에 없습니다. 그 전까지는 이 저장소를 옆에 받아
-> Gradle 이 좌표를 로컬 빌드로 갈음하게 합니다. `implementation(...)` 줄은 그대로 둡니다.
+> **라이브러리 자체를 고치신다면** 이 저장소를 옆에 받아 Gradle 이 배포 좌표를 로컬 빌드로
+> 갈음하게 하세요. `implementation(...)` 줄은 그대로 둡니다.
 >
 > ```kotlin
 > // settings.gradle.kts
@@ -45,7 +45,7 @@ dependencies {
 > }
 > ```
 >
-> 올라가면 이 줄이 사라집니다.
+> 개발 중에도 배포 좌표를 그대로 적어 두는 이유가 이것입니다 — 다 고친 뒤에 바꿀 것이 없습니다.
 
 **모델 파일은 여러분이 준비합니다.** 이 라이브러리는 경로만 받습니다. LiteRT-LM 형식(`.litertlm`)의
 Gemma 모델은 [LiteRT-LM 문서](https://developers.google.com/edge/litert-lm)와 Hugging Face 의

@@ -27,8 +27,8 @@ dependencies {
 Or pick modules individually — `engine`, `device-tier`, `resume` — under the same group and
 version. `resume` is pure JVM and needs no Android.
 
-> **Status:** `0.1.0` is being prepared and is **not on Maven Central yet**. Until it is, clone this
-> repository next to yours and let Gradle substitute the coordinate with the local build:
+> **Working on the library itself?** Clone this repository next to yours and let Gradle substitute
+> the published coordinate with your local build:
 >
 > ```kotlin
 > // settings.gradle.kts
@@ -43,7 +43,8 @@ version. `resume` is pure JVM and needs no Android.
 > }
 > ```
 >
-> The `implementation(...)` lines above stay as they are. This note disappears when the release lands.
+> The `implementation(...)` lines above stay as they are — that is the point of declaring release
+> coordinates even while you develop against a local copy.
 
 `engine` pulls LiteRT-LM in as an `api` dependency. minSdk 26. No consumer ProGuard rules are
 needed — the library uses no reflection or serialization, so R8 keeps exactly what you call.
