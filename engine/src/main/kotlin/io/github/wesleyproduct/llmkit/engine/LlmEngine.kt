@@ -267,9 +267,10 @@ public class LlmEngine(
     /**
      * Streamed reply: emits the text so far as the model generates it. Holds the engine for the
      * whole generation, like [send]. Emissions are untrimmed; trim the final text. Cold: collect once.
-     * Stops at [maxChars] the same way [generateStream] does. The chat's [ContextUsage] is updated
-     * on normal completion and on cancellation — the text delivered so far is in the conversation
-     * either way — and left untouched when the call fails before anything was generated.
+     * Stops at [maxChars] the same way [generateStream] does. Bookkeeping follows what actually
+     * reached the conversation: a stale chat counts nothing; a runtime failure after the message was
+     * sent counts the input but no output and publishes no stats; normal completion and cancellation
+     * count both (the text delivered so far is in the conversation either way).
      * @throws StaleModelException if the model was switched since [chat] was opened.
      */
     public fun sendStream(chat: Chat, message: String, maxChars: Int = limits.maxGenChars): Flow<String> {

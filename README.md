@@ -35,6 +35,10 @@ version. `resume` is pure JVM and needs no Android.
 > includeBuild("../stepgrid-llm-kit") {
 >     dependencySubstitution {
 >         substitute(module("io.github.wesley-product:llm-kit")).using(project(":llm-kit"))
+>         // If you depend on modules individually, substitute those too:
+>         // substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
+>         // substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
+>         // substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
 >     }
 > }
 > ```
@@ -156,6 +160,8 @@ engine.startConversation(system, sampling = chatty)   // fixed for that conversa
 - **One `LlmEngine` per app.** The model is gigabytes; with DI, make it a singleton.
 - `engine.close(chat)` when the screen that owns the chat goes away. After `useModel()` switches
   models, any open `Chat` throws `StaleModelException` on its next `send` — open a new one.
+- `engine.forget(id)` when you delete a model's file — if it was the one loaded, the engine is
+  torn down so the memory is actually reclaimed.
 - `engine.close()` when the engine's owner is destroyed. `close(chat)` after that is a no-op.
 - If **every** rung of the ladder fails, `generate` / `startConversation` throw the last cause. That
   device cannot run this model: treat it like `device-tier`'s `UNSUPPORTED`. `EngineEvents.onEngineBuildAttemptFailed`
@@ -208,10 +214,24 @@ chip with too little RAM. Thresholds are parameters (`TierThresholds`); the defa
 4B-INT4 / 1.5B / 0.6B lineup. With a single model, use it as a gate: anything but `UNSUPPORTED`.
 
 Android has no API that says how fast a chip is — only a name string — so `classifyChip` is a
-table of known patterns, and unknown chips are capped at `STANDARD`: guessing low costs a better
-answer the user never knows about; guessing high costs a multi-GB download that then crawls or
-crashes. **Do not trust the table; fix it for the devices you actually see**, and read
-`DeviceSpecs.soc` to find out what those were.
+table of known patterns, and unknown chips are capped at `STANDARD`. The two directions of error
+do not cost the same:
+
+| Guess | What the user experiences |
+|---|---|
+| Too low | A lesser answer than the device could give — and they never know |
+| Too high | A multi-GB download, then an app that crawls or crashes |
+
+**Do not trust the table; fix it for the devices you actually see**, and read `DeviceSpecs.soc`
+to find out what those were.
+
+### Why reading and deciding are separate functions
+
+`readDeviceSpecs(context)` reads Android; `tierOf(specs)` is a pure function. They used to be one
+function — and so had no tests at all: a mid-range device with 6 GB RAM and 8 cores could only be
+produced by faking `Build` and `ActivityManager`, and then the thing under test is the fake. The
+same split is what made it possible to extract this into a library. Not being testable and not
+being extractable were the same problem.
 
 ## `resume`
 

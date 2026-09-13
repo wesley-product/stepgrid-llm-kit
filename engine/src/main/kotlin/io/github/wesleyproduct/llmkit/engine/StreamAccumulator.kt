@@ -8,7 +8,7 @@ package io.github.wesleyproduct.llmkit.engine
  * anything else is a delta and is appended. Chunks are kept untrimmed on purpose — trimming each
  * delta would glue words together; trim the final text instead.
  */
-public class StreamAccumulator {
+internal class StreamAccumulator {
     private val acc = StringBuilder()
 
     /** Text accumulated so far. */

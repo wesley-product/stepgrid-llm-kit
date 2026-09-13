@@ -37,6 +37,10 @@ dependencies {
 > includeBuild("../stepgrid-llm-kit") {
 >     dependencySubstitution {
 >         substitute(module("io.github.wesley-product:llm-kit")).using(project(":llm-kit"))
+>         // 개별 모듈로 받는다면 그 좌표도 같이:
+>         // substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
+>         // substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
+>         // substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
 >     }
 > }
 > ```
@@ -156,6 +160,7 @@ engine.startConversation(system, sampling = chatty)   // 대화 단위로 고정
 - `LlmEngine` 은 **앱에 하나**입니다(엔진이 GB 단위라). DI 를 쓰면 싱글턴으로.
 - `Chat` 은 화면이 사라질 때 `engine.close(chat)`. 모델을 바꾸면(`useModel`) 열려 있던 `Chat` 은
   다음 `send` 에서 `StaleModelException` 을 던집니다 — 새 대화를 여세요.
+- 모델 파일을 지웠으면 `engine.forget(id)` — 올라와 있던 모델이면 엔진을 내려 메모리를 실제로 돌려받습니다.
 - 엔진의 주인이 죽을 때 `engine.close()`. 그 뒤의 `close(chat)` 은 아무 일도 하지 않습니다.
 - 사다리 여섯 칸이 **전부** 실패하면 `generate`/`startConversation` 이 마지막 예외를 던집니다.
   그 기기는 이 모델을 못 돌리는 것이니 `device-tier` 의 `UNSUPPORTED` 와 같게 다루세요.
@@ -266,10 +271,23 @@ tierOf(specs, TierThresholds(ramProGb = 12.0))
 떼어내려니 그게 걸렸고, 나누고 나서야 테스트가 붙었습니다. 테스트가 안 써지는 것과 떼어낼 수
 없는 것이 **같은 원인**이었습니다.
 
+## 설계 규칙
+
+- **판단은 순수하게, 잎은 얇게.** `tierOf` / `readDeviceSpecs`, `engineLadder` / `LlmEngine`.
+  JVM 에서 테스트할 수 없는 규칙이 있으면 아직 덜 가른 것입니다.
+- **사실만 보고합니다. 추정을 사실처럼 내놓지 않습니다.**
+- **기본은 침묵.** `EngineEvents` 를 잇지 않으면 Logcat 에 아무것도 쓰지 않습니다.
+- **명시적 API.** `explicitApi()` 가 켜져 있고, 모든 공개 선언에 왜 있는지가 KDoc 으로 적혀 있습니다.
+
+## 버전
+
+SemVer 를 따릅니다. 1.0 전에는 마이너 버전이 공개 API 를 바꿀 수 있고, 그런 변경은 전부
+[CHANGELOG.md](./CHANGELOG.md) 에 적습니다. [CONTRIBUTING.md](./CONTRIBUTING.md) 도 보세요.
+
 ## 개발
 
 ```bash
-./gradlew :resume:test :device-tier:testDebugUnitTest
+./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest
 ```
 
 ## 라이선스
