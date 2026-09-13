@@ -36,6 +36,12 @@ nonsense, and it did not.
   - `StreamMode` — whether chunks are deltas or cumulative snapshots is **stated**, not
     guessed. A model that repeats a token emits the same chunk twice, which no heuristic can
     tell apart from a snapshot; guessing dropped the repetition. Default matches LiteRT-LM 0.13.x.
+  - **Cancelling a streamed reply no longer deadlocks the engine.** `channelFlow` closes its channel
+    only once the producer coroutine finishes, and the producer is parked inside `NonCancellable`
+    while the runtime winds down — so after the collector left, `send()` neither threw nor returned:
+    it suspended forever, holding the engine and every call queued behind it. On a Galaxy S25 that
+    was "cancel one reply and the app never answers again". The producer's own `Job` is asked before
+    each delivery instead.
   - The wait for a cancelled generation is bounded by `stopGraceMillis` and reported as
     `GenerationStats.stopWaitMillis`. A runtime that ignores the stop request would otherwise hold
     the engine forever and every call queued behind it; past the grace the engine is quarantined

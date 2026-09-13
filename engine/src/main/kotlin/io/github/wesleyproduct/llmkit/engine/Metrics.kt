@@ -165,13 +165,6 @@ internal class ContextUsageTracker(
 public enum class ReleaseReason { MODEL_SWITCHED, MODEL_FORGOTTEN, CLOSED }
 
 /**
- * Callbacks for anyone who wants to watch the engine — telemetry, a debug overlay, logs. All
- * methods default to nothing, so implement only what you need.
- *
- * Every callback is invoked on the engine's dispatcher (the `ioDispatcher` given to [LlmEngine]),
- * including [onGeneration] after a streamed reply. Hop to the main thread yourself if you touch UI.
- */
-/**
  * What an [LlmEngine] is right now.
  *
  * [STUCK] exists because it is not a shade of the other two: the instance is not closed — nobody
@@ -193,6 +186,13 @@ public enum class EngineState {
     CLOSED,
 }
 
+/**
+ * Callbacks for anyone who wants to watch the engine — telemetry, a debug overlay, logs. All
+ * methods default to nothing, so implement only what you need.
+ *
+ * Every callback is invoked on the engine's dispatcher (the `ioDispatcher` given to [LlmEngine]),
+ * including [onGeneration] after a streamed reply. Hop to the main thread yourself if you touch UI.
+ */
 public interface EngineEvents {
     /** An engine came up. [info] says on which rung, how long it took and what it cost. */
     public fun onEngineBuilt(info: EngineInfo) {}

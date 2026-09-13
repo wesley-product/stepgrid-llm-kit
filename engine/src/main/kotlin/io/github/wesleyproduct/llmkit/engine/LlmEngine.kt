@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -334,6 +335,9 @@ public class LlmEngine(
         val stats = StatsRecorder(attempt, clock)
         var outcome: StreamOutcome? = null
         return channelFlow {
+            // Captured before the NonCancellable stretch: this is the only handle that still knows
+            // whether anyone is listening. See drain().
+            val producer = coroutineContext.job
             engineMutex.withLock {
                 ensureOpen()
                 // Resolve the engine first: "no model selected" and "model not on disk" are state
@@ -345,6 +349,7 @@ public class LlmEngine(
                         source = conversation.sendMessageAsync(prompt).map { rawTextOf(it) },
                         maxChars = maxChars,
                         stop = { stopGenerating(conversation) },
+                        downstreamAlive = { producer.isActive },
                     ) { send(it) }
                 }
             }
@@ -425,6 +430,7 @@ public class LlmEngine(
         var finalText = ""
         var inputCounted = false
         return channelFlow {
+            val producer = coroutineContext.job     // see drain(): the only handle that knows
             engineMutex.withLock {
                 ensureOpen()
                 if (chat.epoch != epoch) throw StaleModelException()
@@ -436,6 +442,7 @@ public class LlmEngine(
                         source = chat.conversation.sendMessageAsync(message).map { rawTextOf(it) },
                         maxChars = maxChars,
                         stop = { stopGenerating(chat.conversation) },
+                        downstreamAlive = { producer.isActive },
                     ) {
                         finalText = it
                         send(it)
@@ -553,6 +560,7 @@ public class LlmEngine(
         source: Flow<String>,
         maxChars: Int,
         stop: () -> Unit,
+        downstreamAlive: () -> Boolean = { true },
         emit: suspend (String) -> Unit,
     ): StreamOutcome {
         val acc = StreamAccumulator(limits.streamMode)
@@ -581,6 +589,19 @@ public class LlmEngine(
                         if (stopRequested) return@collect                  // draining: read, deliver nothing
                         if (text.length >= maxChars) {
                             capped = true
+                            requestStop()
+                            return@collect
+                        }
+                        // Ask before delivering, because delivering is what would hang.
+                        //
+                        // channelFlow closes its channel only once the producer coroutine finishes,
+                        // and the producer is us — parked inside NonCancellable. So after the
+                        // collector goes away the channel is neither closed nor drained: send() does
+                        // not throw, it suspends, and nothing ever wakes it. That is a deadlock that
+                        // holds engineMutex, and behind it every later send, useModel and close.
+                        // The producer's own Job is the one thing that does know, so we ask it.
+                        if (!downstreamAlive()) {
+                            downstream = CancellationException("the collector went away")
                             requestStop()
                             return@collect
                         }

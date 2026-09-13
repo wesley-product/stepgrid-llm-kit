@@ -308,4 +308,63 @@ class DrainTest {
         assertEquals(0, quarantines)
         assertEquals(EngineState.OPEN, e.state())
     }
+
+    // ---- nobody listening ------------------------------------------------------------------------
+
+    @Test
+    fun `a departed collector is noticed before we try to deliver to it`() = runTest {
+        // The deadlock this guards. channelFlow closes its channel only when the producer coroutine
+        // finishes, and the producer is parked inside NonCancellable here — so once the collector is
+        // gone, send() neither throws nor returns, it suspends forever, holding the engine and every
+        // call queued behind it. On a Galaxy S25 that showed up as: cancel one reply, and the app
+        // never answers again. Asking the producer's Job first is what makes delivery unnecessary.
+        var delivered = 0
+        var stops = 0
+        val outcome = engine().drain(
+            source = flowOf("a", "b", "c", "d"),
+            maxChars = 1_000,
+            stop = { stops++ },
+            downstreamAlive = { false },
+        ) {
+            delivered++
+            error("send() would have parked here forever")
+        }
+
+        assertEquals(0, delivered, "nothing may be handed to a collector that is gone")
+        assertEquals(1, stops, "and the runtime is asked to stop, once")
+        assertTrue(outcome.stoppedEarly)
+        assertTrue(outcome.downstream is CancellationException, "was ${outcome.downstream}")
+    }
+
+    @Test
+    fun `a collector that leaves mid-stream gets what came before and nothing after`() = runTest {
+        val seen = mutableListOf<String>()
+        var alive = true
+        val outcome = engine().drain(
+            source = flowOf("one ", "two ", "three ", "four"),
+            maxChars = 1_000,
+            stop = { },
+            downstreamAlive = { alive },
+        ) {
+            seen.add(it)
+            if (seen.size == 2) alive = false     // the screen goes away after the second chunk
+        }
+
+        assertEquals(listOf("one ", "one two "), seen)
+        assertTrue(outcome.stoppedEarly, "leaving early is stopping early")
+    }
+
+    @Test
+    fun `a listening collector is delivered to as before`() = runTest {
+        val seen = mutableListOf<String>()
+        val outcome = engine().drain(
+            source = flowOf("x", "y"),
+            maxChars = 1_000,
+            stop = { },
+            downstreamAlive = { true },
+        ) { seen.add(it) }
+
+        assertEquals(listOf("x", "xy"), seen)
+        assertFalse(outcome.stoppedEarly)
+    }
 }
