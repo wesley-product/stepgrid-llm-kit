@@ -26,6 +26,10 @@ What does not: prompts, safety filtering, model catalogs, download UI. Those are
 
 ## Running the tests
 
+**JDK 21.** The LiteRT-LM artifacts are Java 21 class files, so a JVM unit test that loads any
+of its types fails with `UnsupportedClassVersionError` on an older JDK. Android Studio's
+bundled JBR is 21; CI pins the same.
+
 ```bash
 ./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest
 ```

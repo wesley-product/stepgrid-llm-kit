@@ -18,10 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 21, not 17: the LiteRT-LM artifacts are Java 21 class files, so a JVM unit test that
+      # loads any of its types dies with UnsupportedClassVersionError on anything older.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       # compileSdk 36 — make sure the platform is present and licenses are accepted before Gradle
       # tries to download it itself (which fails on a clean runner without accepted licenses).

@@ -257,8 +257,11 @@ public class LlmEngine(
         return channelFlow {
             engineMutex.withLock {
                 ensureOpen()
+                // Resolve the engine first: "no model selected" and "model not on disk" are state
+                // errors, and they should surface before we touch any runtime type.
+                val live = engine()
                 val sampler = samplerFor(attempt, sampling, limits.seedStride).toRuntime()
-                engine().createConversation(ConversationConfig(samplerConfig = sampler)).use { conversation ->
+                live.createConversation(ConversationConfig(samplerConfig = sampler)).use { conversation ->
                     outcome = drain(conversation, conversation.sendMessageAsync(prompt), maxChars) { send(it) }
                 }
             }
