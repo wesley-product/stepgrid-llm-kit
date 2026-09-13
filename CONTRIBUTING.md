@@ -47,6 +47,11 @@ Open an issue with the device model, Android version, the model file you used, a
 engine problem — the `EngineInfo` your app logged (`onEngineBuilt`) and any
 `onEngineBuildAttemptFailed` causes. That is usually enough to reproduce.
 
+## Releasing
+
+See [RELEASING.md](./RELEASING.md). The short version: a version whose engine has never run on a
+real device does not get released.
+
 ## License
 
 By contributing you agree your contribution is licensed under the [Apache License 2.0](./LICENSE).

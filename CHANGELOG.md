@@ -11,6 +11,10 @@ Before 1.0, minor versions may change public API — each such change is listed 
 First release. Everything here was extracted from a shipping Android app that runs Gemma on-device
 with LiteRT-LM; each piece exists because the app hit the problem it solves.
 
+Verified on a Galaxy S25 (SM-S938N, Android 16, SM8750) with Gemma E2B: the engine came up on the
+first ladder rung (GPU, 4096-token context) in 6.3 s using 315 MB of native heap, and a streamed
+reply arrived as 44 chunks — 96 characters, first chunk at 1.4 s, 3.1 s in total.
+
 ### Added
 
 - **`llm-kit`** — umbrella artifact: one dependency that brings in the three modules below.
