@@ -33,6 +33,8 @@ with LiteRT-LM; each piece exists because the app hit the problem it solves.
     included — runs on the engine's `ioDispatcher`, and so does every `EngineEvents` callback.
     Cancellation is never swallowed by the fallback ladder; JVM `Error`s stop it immediately.
     A failure while closing a chat is reported via `onWarning`, never thrown into the process.
+    `warmUp()` follows the same discipline. A streamed call that fails before generating
+    anything (e.g. `StaleModelException`) leaves the chat's `ContextUsage` and the stats untouched.
 - **`device-tier`** — pick a model size from real device specs: `readDeviceSpecs(context)` (Android)
   and `tierOf(specs, thresholds)` (pure). Chip class and RAM/cores are judged together; unknown chips
   cap at `STANDARD`. `DeviceSpecs.soc` keeps the raw chip name so unknown devices can be identified later.

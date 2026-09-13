@@ -29,11 +29,69 @@ dependencies {
 리플렉션도 직렬화도 안 써서 R8 은 여러분이 부르는 것만 남깁니다.
 
 > **상태:** `0.1.0` 은 준비 중이고 아직 Maven Central 에 없습니다. 그 전까지는 이 저장소를 옆에 받아
-> `settings.gradle.kts` 에서 `includeBuild` 로 무는 방법이 있습니다. 올라가면 이 줄이 사라집니다.
+> Gradle 이 좌표를 로컬 빌드로 갈음하게 합니다. `implementation(...)` 줄은 그대로 둡니다.
+>
+> ```kotlin
+> // settings.gradle.kts
+> includeBuild("../stepgrid-llm-kit") {
+>     dependencySubstitution {
+>         substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
+>         substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
+>         substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
+>     }
+> }
+> ```
+>
+> 올라가면 이 줄이 사라집니다.
 
 **모델 파일은 여러분이 준비합니다.** 이 라이브러리는 경로만 받습니다. LiteRT-LM 형식(`.litertlm`)의
 Gemma 모델은 [LiteRT-LM 문서](https://developers.google.com/edge/litert-lm)와 Hugging Face 의
 `litert-community` 에서 구할 수 있고, 각 모델의 라이선스를 확인하는 것도 여러분 몫입니다.
+
+## 셋을 이어 붙이면
+
+등급 판정 → 받기 → 돌리기. 모델 id·파일명·URL 은 **여러분이 정합니다** — 라이브러리는 그것들을
+모르고, 여러분이 풀어 준 경로만 받습니다.
+
+```kotlin
+// 1. 이 기기는 어느 크기를 돌릴 수 있나
+val tier = tierOf(readDeviceSpecs(context))
+val model = when (tier) {
+    ModelTier.UNSUPPORTED -> return explainAndStop()
+    ModelTier.LITE        -> Model("small",  "https://your.cdn/models/small.litertlm")   // 예: 0.6B
+    ModelTier.STANDARD    -> Model("medium", "https://your.cdn/models/medium.litertlm")  // 예: 1.5B
+    ModelTier.PRO         -> Model("large",  "https://your.cdn/models/large.litertlm")   // 예: 4B INT4
+}
+
+// 2. 안전하게 이어받기 (루프는 여러분 것, 라이브러리는 이어 붙일지 다시 받을지만 정합니다)
+val target = File(context.filesDir, "${model.id}.litertlm")
+val existing = target.length()
+val conn = (URL(model.url).openConnection() as HttpURLConnection).apply {
+    if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
+}
+val plan = ResumePlan.of(existing, conn.responseCode, conn.contentLengthLong)
+FileOutputStream(target, plan.append).use { conn.inputStream.copyTo(it) }
+
+// 3. 돌리기
+engine.useModel(model.id)                       // 엔진의 ModelSource 가 "large" -> target.path 로 풉니다
+val chat = engine.startConversation("당신은 산책 동행입니다.")
+engine.sendStream(chat, "같은 생각이 계속 맴돕니다.").collect { render(it) }
+```
+
+엔진은 앱에 하나. Hilt 라면:
+
+```kotlin
+@Module @InstallIn(SingletonComponent::class)
+object LlmModule {
+    @Provides @Singleton
+    fun engine(@ApplicationContext ctx: Context, store: ModelStore): LlmEngine = LlmEngine(
+        models = { id -> store.pathOf(id) },       // 아직 안 받았으면 null
+        ioDispatcher = Dispatchers.IO,
+        cacheDir = File(ctx.cacheDir, "litertlm").apply { mkdirs() }.path,
+        memoryProbe = { readMemory(ctx) },
+    )
+}
+```
 
 ## `engine` — 추론·스트리밍
 
@@ -83,9 +141,15 @@ engine.generate(prompt, attempt = 1)   // 다른 표본
 
 요약은 결정론적으로, 대화는 자유롭게 — 엔진을 둘 둘 필요 없습니다.
 
+**엔진의 샘플러를 복사해서 바꾸세요. 새로 만들면 안 됩니다** — `Sampling(temperature = 0.0)` 은
+여러분이 맞춰 둔 `topK`/`topP` 가 아니라 클래스 기본값으로 조용히 되돌아갑니다.
+
 ```kotlin
-engine.generate(prompt, sampling = Sampling(temperature = 0.0), maxChars = 300)
-engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // 대화 단위로 고정됩니다
+val greedy = engine.limits.sampling.copy(temperature = 0.0)
+engine.generate(prompt, sampling = greedy, maxChars = 300)
+
+val chatty = engine.limits.sampling.copy(temperature = 0.9)
+engine.startConversation(system, sampling = chatty)   // 대화 단위로 고정됩니다
 ```
 
 ### 수명
@@ -93,12 +157,14 @@ engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // �
 - `LlmEngine` 은 **앱에 하나**입니다(엔진이 GB 단위라). DI 를 쓰면 싱글턴으로.
 - `Chat` 은 화면이 사라질 때 `engine.close(chat)`. 모델을 바꾸면(`useModel`) 열려 있던 `Chat` 은
   다음 `send` 에서 `StaleModelException` 을 던집니다 — 새 대화를 여세요.
-- 엔진의 주인이 죽을 때 `engine.close()`.
+- 엔진의 주인이 죽을 때 `engine.close()`. 그 뒤의 `close(chat)` 은 아무 일도 하지 않습니다.
 - 사다리 여섯 칸이 **전부** 실패하면 `generate`/`startConversation` 이 마지막 예외를 던집니다.
   그 기기는 이 모델을 못 돌리는 것이니 `device-tier` 의 `UNSUPPORTED` 와 같게 다루세요.
   `EngineEvents.onEngineBuildAttemptFailed` 로 어느 칸이 왜 실패했는지 받을 수 있습니다.
 - 런타임을 만지는 모든 호출은 넘긴 `ioDispatcher` 에서 돕니다 — `useModel`·해제·모든 `EngineEvents` 콜백까지.
   UI 를 만지려면 메인으로 직접 옮기세요.
+- 스트리밍 수집을 취소하면 전달이 멈추고 엔진이 풀립니다. 그 순간 런타임이 안에서 생성을 멈추는지는
+  런타임의 동작이고 이 라이브러리가 보장하는 것이 아닙니다.
 
 ### 무슨 일이 있었는지 말해 줍니다 — 확실히 아는 것만
 

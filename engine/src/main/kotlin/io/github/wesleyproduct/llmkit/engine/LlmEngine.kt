@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.lastOrNull
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.transformWhile
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -143,6 +144,7 @@ public class LlmEngine(
     /**
      * Tear everything down: the engine, and the scope that closes chats. After this the instance is
      * dead — build a new one to use a model again. Call from wherever the engine's owner is destroyed.
+     * A [close] of a chat issued after this does nothing (and says so through [EngineEvents.onWarning]).
      */
     public suspend fun close() {
         withContext(ioDispatcher) {
@@ -172,8 +174,10 @@ public class LlmEngine(
      * path so it inherits the output cap — an un-streamed call has nothing else bounding it, and a
      * model that never emits EOS would hold the mutex forever.
      *
-     * @param sampling Decoding for this call. Defaults to [GenerationLimits.sampling]; pass
-     *   `Sampling(temperature = 0.0)` for deterministic output without a second engine instance.
+     * @param sampling Decoding for this call. Defaults to [GenerationLimits.sampling]. To change one
+     *   knob and keep the rest of what the engine was configured with, **copy** rather than
+     *   construct: `engine.limits.sampling.copy(temperature = 0.0)`. A fresh `Sampling(temperature = 0.0)`
+     *   silently resets `topK`/`topP` to the class defaults, not to yours.
      * @param maxChars Output cap for this call. Defaults to [GenerationLimits.maxGenChars].
      */
     public suspend fun generate(
@@ -189,7 +193,10 @@ public class LlmEngine(
      * Streamed one-shot generation. Each emission is the raw text SO FAR (see [StreamAccumulator]).
      * Holds the engine for the whole run. Cold: collect once per call. Stops — and releases the
      * engine — as soon as the text reaches [maxChars]; the chunk that crossed the cap is not emitted
-     * and not counted in the stats.
+     * and not counted in the stats. Stats are published on normal completion and on cancellation
+     * (what was delivered is real either way); a failure publishes nothing.
+     *
+     * @param sampling See [generate] — prefer `limits.sampling.copy(...)` over a fresh instance.
      */
     public fun generateStream(
         prompt: String,
@@ -210,7 +217,7 @@ public class LlmEngine(
         }
             .transformWhile { text -> if (text.length < maxChars) { emit(text); true } else { capped = true; false } }
             .onEach { stats.emission(it) }
-            .onCompletion { publish(stats.finish(truncatedByCap = capped)) }
+            .onCompletion { cause -> if (cause == null || cause is CancellationException) publish(stats.finish(truncatedByCap = capped)) }
             .flowOn(ioDispatcher)   // everything above — including the stats callback — runs on the engine's dispatcher
     }
 
@@ -219,7 +226,7 @@ public class LlmEngine(
      * so context carries across turns without re-sending a transcript. Caller must [close] it.
      *
      * @param sampling Decoding for the whole conversation. The runtime fixes it when the
-     *   conversation is created, so it cannot change per [send].
+     *   conversation is created, so it cannot change per [send]. Prefer `limits.sampling.copy(...)`.
      */
     public suspend fun startConversation(
         systemInstruction: String,
@@ -258,26 +265,32 @@ public class LlmEngine(
     /**
      * Streamed reply: emits the text so far as the model generates it. Holds the engine for the
      * whole generation, like [send]. Emissions are untrimmed; trim the final text. Cold: collect once.
-     * Stops at [maxChars] the same way [generateStream] does.
+     * Stops at [maxChars] the same way [generateStream] does. The chat's [ContextUsage] is updated
+     * on normal completion and on cancellation — the text delivered so far is in the conversation
+     * either way — and left untouched when the call fails before anything was generated.
      * @throws StaleModelException if the model was switched since [chat] was opened.
      */
     public fun sendStream(chat: Chat, message: String, maxChars: Int = limits.maxGenChars): Flow<String> {
         val stats = StatsRecorder(attempt = 0, now = clock)
         var capped = false
         var finalText = ""
+        var inputCounted = false
         return flow {
             engineMutex.withLock {
                 if (chat.epoch != epoch) throw StaleModelException()
                 chat.tracker.addInput(message)
+                inputCounted = true
                 val acc = StreamAccumulator()
                 chat.conversation.sendMessageAsync(message).collect { emit(acc.push(rawTextOf(it))) }
             }
         }
             .transformWhile { text -> if (text.length < maxChars) { emit(text); true } else { capped = true; false } }
             .onEach { finalText = it; stats.emission(it) }
-            .onCompletion {
-                chat.tracker.addOutput(finalText)
-                publish(stats.finish(truncatedByCap = capped))
+            .onCompletion { cause ->
+                if (inputCounted && (cause == null || cause is CancellationException)) {
+                    chat.tracker.addOutput(finalText)
+                    publish(stats.finish(truncatedByCap = capped))
+                }
             }
             .flowOn(ioDispatcher)
     }
@@ -287,9 +300,14 @@ public class LlmEngine(
      * its own `close()` does to conversations it created — we assume it tears them down too, and
      * skip closing a stale chat rather than risk a double free. Worst case if that assumption is
      * wrong is a leak, which is the side to be wrong on. Failures are reported via
-     * [EngineEvents.onWarning], never thrown.
+     * [EngineEvents.onWarning], never thrown. After [close] of the engine itself this is a no-op
+     * and is reported as such.
      */
     public fun close(chat: Chat) {
+        if (!closeScope.isActive) {
+            events.onWarning("close(chat) after the engine was closed — nothing to do", null)
+            return
+        }
         closeScope.launch {
             engineMutex.withLock {
                 if (chat.epoch == epoch) chat.conversation.close()
@@ -300,16 +318,19 @@ public class LlmEngine(
     /**
      * Build the engine for the selected model ahead of time (no generation) so the first real call
      * doesn't pay the multi-second cold load. No-op when nothing is downloaded; cheap once built.
+     * Same exception discipline as the ladder: cancellation and JVM [Error]s propagate; only the
+     * runtime's own failures are reported as a warning.
      */
     public suspend fun warmUp() {
         if (!isReady()) return
         withContext(ioDispatcher) {
-            runCatching { engineMutex.withLock { engine() } }
-                .onFailure {
-                    // A cancelled caller must see its cancellation, not a logged warm-up failure.
-                    if (it is CancellationException) throw it
-                    events.onWarning("warmUp failed", it)
-                }
+            try {
+                engineMutex.withLock { engine() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                events.onWarning("warmUp failed", e)
+            }
         }
     }
 

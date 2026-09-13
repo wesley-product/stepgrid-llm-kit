@@ -27,8 +27,20 @@ dependencies {
 ```
 
 > **Status:** `0.1.0` is being prepared and is **not on Maven Central yet**. Until it is, clone this
-> repository next to yours and pull it in with `includeBuild` in `settings.gradle.kts`. This note
-> disappears when the release lands.
+> repository next to yours and let Gradle substitute the coordinates with the local build:
+>
+> ```kotlin
+> // settings.gradle.kts
+> includeBuild("../stepgrid-llm-kit") {
+>     dependencySubstitution {
+>         substitute(module("io.github.wesley-product:engine")).using(project(":engine"))
+>         substitute(module("io.github.wesley-product:device-tier")).using(project(":device-tier"))
+>         substitute(module("io.github.wesley-product:resume")).using(project(":resume"))
+>     }
+> }
+> ```
+>
+> The `implementation(...)` lines above stay as they are. This note disappears when the release lands.
 
 `engine` pulls LiteRT-LM in as an `api` dependency. minSdk 26. No consumer ProGuard rules are
 needed — the library uses no reflection or serialization, so R8 keeps exactly what you call.
@@ -36,6 +48,51 @@ needed — the library uses no reflection or serialization, so R8 keeps exactly 
 **You bring the model file.** The library only ever asks for a path. Gemma models in LiteRT-LM
 format (`.litertlm`) are documented at [LiteRT-LM](https://developers.google.com/edge/litert-lm)
 and published under `litert-community` on Hugging Face; checking each model's license is on you.
+
+## Putting the three together
+
+Tier → download → run. Model ids, file names and URLs below are **yours to define** — the library
+never sees them, only the path you resolve them to.
+
+```kotlin
+// 1. Which size can this device run?
+val tier = tierOf(readDeviceSpecs(context))
+val model = when (tier) {
+    ModelTier.UNSUPPORTED -> return explainAndStop()
+    ModelTier.LITE        -> Model("small",  "https://your.cdn/models/small.litertlm")   // e.g. a 0.6B
+    ModelTier.STANDARD    -> Model("medium", "https://your.cdn/models/medium.litertlm")  // e.g. a 1.5B
+    ModelTier.PRO         -> Model("large",  "https://your.cdn/models/large.litertlm")   // e.g. a 4B INT4
+}
+
+// 2. Download it, resuming safely (your loop; the library only decides append vs restart)
+val target = File(context.filesDir, "${model.id}.litertlm")
+val existing = target.length()
+val conn = (URL(model.url).openConnection() as HttpURLConnection).apply {
+    if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
+}
+val plan = ResumePlan.of(existing, conn.responseCode, conn.contentLengthLong)
+FileOutputStream(target, plan.append).use { conn.inputStream.copyTo(it) }
+
+// 3. Run it
+engine.useModel(model.id)                       // engine's ModelSource maps "large" -> target.path
+val chat = engine.startConversation("You are a walking companion.")
+engine.sendStream(chat, "I keep circling the same thought.").collect { render(it) }
+```
+
+One engine per app. With Hilt:
+
+```kotlin
+@Module @InstallIn(SingletonComponent::class)
+object LlmModule {
+    @Provides @Singleton
+    fun engine(@ApplicationContext ctx: Context, store: ModelStore): LlmEngine = LlmEngine(
+        models = { id -> store.pathOf(id) },       // null until downloaded
+        ioDispatcher = Dispatchers.IO,
+        cacheDir = File(ctx.cacheDir, "litertlm").apply { mkdirs() }.path,
+        memoryProbe = { readMemory(ctx) },
+    )
+}
+```
 
 ## `engine`
 
@@ -83,11 +140,16 @@ engine.generate(prompt, attempt = 1)   // a different sample
 
 ### Per call, not per engine
 
-Deterministic summaries and a chatty assistant from the same engine — no second instance:
+Deterministic summaries and a chatty assistant from the same engine — no second instance.
+**Copy the engine's sampler, don't construct a new one**: `Sampling(temperature = 0.0)` would
+silently reset `topK`/`topP` to the class defaults instead of the values you configured.
 
 ```kotlin
-engine.generate(prompt, sampling = Sampling(temperature = 0.0), maxChars = 300)
-engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // fixed for that conversation
+val greedy = engine.limits.sampling.copy(temperature = 0.0)
+engine.generate(prompt, sampling = greedy, maxChars = 300)
+
+val chatty = engine.limits.sampling.copy(temperature = 0.9)
+engine.startConversation(system, sampling = chatty)   // fixed for that conversation
 ```
 
 ### Lifecycle
@@ -95,12 +157,14 @@ engine.startConversation(system, sampling = Sampling(temperature = 0.9))   // fi
 - **One `LlmEngine` per app.** The model is gigabytes; with DI, make it a singleton.
 - `engine.close(chat)` when the screen that owns the chat goes away. After `useModel()` switches
   models, any open `Chat` throws `StaleModelException` on its next `send` — open a new one.
-- `engine.close()` when the engine's owner is destroyed.
+- `engine.close()` when the engine's owner is destroyed. `close(chat)` after that is a no-op.
 - If **every** rung of the ladder fails, `generate` / `startConversation` throw the last cause. That
   device cannot run this model: treat it like `device-tier`'s `UNSUPPORTED`. `EngineEvents.onEngineBuildAttemptFailed`
   tells you which rung failed and why.
 - Everything that touches the runtime runs on the `ioDispatcher` you pass — including `useModel`,
   teardown, and every `EngineEvents` callback. Hop to the main thread yourself for UI.
+- Cancelling the collector of a streamed reply stops delivery and releases the engine. Whether the
+  runtime stops generating internally at that moment is the runtime's behaviour, not this library's.
 
 ### It tells you what happened — and only what it knows
 
