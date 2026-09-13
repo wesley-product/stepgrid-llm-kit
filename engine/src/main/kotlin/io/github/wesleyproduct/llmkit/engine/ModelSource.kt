@@ -8,5 +8,6 @@ package io.github.wesleyproduct.llmkit.engine
  * engine answers [LlmEngine.isReady].
  */
 public fun interface ModelSource {
+    /** Absolute path of the weights for [modelId], or `null` if they are not on disk (yet). */
     public fun pathOf(modelId: String): String?
 }

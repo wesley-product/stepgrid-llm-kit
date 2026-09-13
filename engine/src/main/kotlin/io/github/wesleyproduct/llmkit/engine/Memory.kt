@@ -29,6 +29,7 @@ public data class MemoryDelta(
     val millis: Long,
 ) {
     public companion object {
+        /** `after` minus `before`. Positive numbers mean memory was consumed between the two. */
         public fun between(before: MemorySnapshot, after: MemorySnapshot): MemoryDelta = MemoryDelta(
             javaHeapBytes = after.javaHeapUsedBytes - before.javaHeapUsedBytes,
             nativeHeapBytes = after.nativeHeapAllocatedBytes - before.nativeHeapAllocatedBytes,

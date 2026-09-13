@@ -85,6 +85,7 @@ internal class StatsRecorder(
  * for Korean by a factor that depends on the text.
  */
 public fun interface TokenCounter {
+    /** Number of tokens [text] occupies in the model's context window. */
     public fun count(text: String): Int
 }
 
@@ -163,10 +164,20 @@ public enum class ReleaseReason { MODEL_SWITCHED, MODEL_FORGOTTEN, CLOSED }
  * including [onGeneration] after a streamed reply. Hop to the main thread yourself if you touch UI.
  */
 public interface EngineEvents {
+    /** An engine came up. [info] says on which rung, how long it took and what it cost. */
     public fun onEngineBuilt(info: EngineInfo) {}
+
+    /** One rung of the ladder failed and the next will be tried. [index] is 0-based out of [total].
+     *  If every rung fails, the calling operation throws the last [cause] instead. */
     public fun onEngineBuildAttemptFailed(attempt: EngineAttempt, index: Int, total: Int, cause: Throwable) {}
+
+    /** The live engine was torn down — because the model changed, was deleted, or the engine was closed. */
     public fun onEngineReleased(modelId: String, reason: ReleaseReason) {}
+
+    /** A generation finished (normally or by cancellation). Not called for calls that failed before producing anything. */
     public fun onGeneration(stats: GenerationStats) {}
+
+    /** Something recoverable went wrong: a fallback rung, a failed warm-up, a failed chat close. */
     public fun onWarning(message: String, cause: Throwable?) {}
 
     public companion object {

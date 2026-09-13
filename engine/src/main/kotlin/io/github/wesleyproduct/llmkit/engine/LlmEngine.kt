@@ -59,6 +59,8 @@ public class LlmEngine(
     private val models: ModelSource,
     private val ioDispatcher: CoroutineDispatcher,
     private val cacheDir: String? = null,
+    /** The limits this engine was built with. Exposed so callers can derive per-call overrides from
+     *  them — `limits.sampling.copy(temperature = 0.0)` — instead of constructing from scratch. */
     public val limits: GenerationLimits = GenerationLimits(),
     private val tokenCounter: TokenCounter? = null,
     private val memoryProbe: (() -> MemorySnapshot)? = null,
