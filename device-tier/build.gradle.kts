@@ -1,5 +1,5 @@
-// AGP 9 는 코틀린을 내장한다 — org.jetbrains.kotlin.android 를 같이 붙이면
-// "extension with name 'kotlin' already registered" 로 빌드가 죽는다.
+// AGP 9 bundles Kotlin — adding org.jetbrains.kotlin.android on top fails with
+// "extension with name 'kotlin' already registered".
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.maven.publish)
@@ -12,8 +12,8 @@ android {
     }
 
     defaultConfig {
-        // 안드로이드 8.0. LiteRT-LM 자체는 더 낮은 API 도 받지만, 이 판단이 쓰이는 자리는
-        // GB 단위 모델을 올리는 기기라 그 아래를 지원하는 것이 의미가 없다.
+        // Android 8.0. LiteRT-LM itself accepts lower, but this decision is only ever made on
+        // devices that load GB-sized models; supporting anything below is meaningless.
         minSdk = 26
     }
 
@@ -22,8 +22,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    // 등급 판단은 순수 함수라 로보렉트릭 없이 평범한 유닛 테스트로 검사한다.
-    // 안드로이드를 읽는 부분(DeviceSpecs.read)만 기기에서 도는 코드로 남는다.
+    // The tier decision is a pure function, tested as plain JVM unit tests without Robolectric.
+    // Only the part that reads Android (readDeviceSpecs) stays as device-only code.
     testOptions.unitTests.all { it.useJUnitPlatform() }
 }
 

@@ -3,8 +3,8 @@ plugins {
     alias(libs.plugins.maven.publish)
 }
 
-// 안드로이드에 안 붙인다 — 큰 파일을 이어받는 판단은 플랫폼과 상관없는 규칙이다.
-// 서버에서도, 데스크톱에서도 같은 답이 나와야 한다.
+// Not an Android module on purpose: whether a large download can be resumed is a rule about HTTP,
+// not about a platform. It must give the same answer on a server or a desktop.
 java {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
