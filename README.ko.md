@@ -317,6 +317,16 @@ SemVer 를 따릅니다. 1.0 전에는 마이너 버전이 공개 API 를 바꿀
 ./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest
 ```
 
+## 더 읽을 것
+
+이 라이브러리가 존재하는 이유가 된 문제들을, 떼어낸 앱 쪽에서 적은 글입니다
+([Wesley's Dev Log](https://victorywskim.tistory.com/)).
+
+- [안드로이드 온디바이스 LLM 추론 엔진 오픈소스 공개](https://victorywskim.tistory.com/136) — 무엇을 떼어냈고 왜 열었나
+- [온디바이스 LLM 이란? (LiteRT-LM)](https://victorywskim.tistory.com/99) — 이 라이브러리가 나온 연재
+- [갤럭시 S10 온디바이스 LLM 응답 44초](https://victorywskim.tistory.com/131) — `device-tier` 가 있는 이유
+- [connectedAndroidTest 데이터 삭제](https://victorywskim.tistory.com/130) — 이어받기가 필요한 이유
+
 ## 라이선스
 
 [Apache License 2.0](./LICENSE)

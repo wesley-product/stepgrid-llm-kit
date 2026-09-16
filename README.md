@@ -304,6 +304,16 @@ SemVer. Before 1.0, minor versions may change public API; every such change is l
 ./gradlew :resume:test :device-tier:testDebugUnitTest :engine:testDebugUnitTest
 ```
 
+## Further reading
+
+Write-ups of the problems this library exists to solve, from the app it was extracted from
+(Korean, on [Wesley's Dev Log](https://victorywskim.tistory.com/)):
+
+- [Opening the inference engine](https://victorywskim.tistory.com/136) — what was pulled out of a shipping app, and why
+- [What LiteRT-LM is, and why not MediaPipe](https://victorywskim.tistory.com/99) — the series this library came out of
+- [A 44-second reply on a Galaxy S10](https://victorywskim.tistory.com/131) — why `device-tier` exists
+- [`connectedAndroidTest` wiped 2.6 GB of model](https://victorywskim.tistory.com/130) — why resumable download matters
+
 ## License
 
 [Apache License 2.0](./LICENSE)
