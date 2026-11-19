@@ -43,4 +43,25 @@ class EngineLadderTest {
         val l = engineLadder(path, null, GenerationLimits(maxContextTokens = 1024, roomyContextTokens = 8192))
         assertEquals(listOf(8192, 8192, 1024, 1024, null, null), l.map { it.maxTokens })
     }
+
+    @Test
+    fun `cpu first, one size, no uncapped rungs — the 8GB-phone ladder`() {
+        val l = engineLadder(
+            path, null,
+            GenerationLimits(maxContextTokens = 2048, roomyContextTokens = 2048, computeOrder = listOf(Compute.CPU, Compute.GPU), uncappedFallback = false),
+        )
+        assertEquals(listOf(Compute.CPU to 2048, Compute.GPU to 2048), l.map { it.compute to it.maxTokens })
+    }
+
+    @Test
+    fun `a single backend gives one rung per size`() {
+        val l = engineLadder(path, null, GenerationLimits(computeOrder = listOf(Compute.CPU)))
+        assertEquals(listOf(Compute.CPU to 4096, Compute.CPU to 2048, Compute.CPU to null), l.map { it.compute to it.maxTokens })
+    }
+
+    @Test
+    fun `a backend listed twice is refused`() {
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> { GenerationLimits(computeOrder = listOf(Compute.CPU, Compute.CPU)) }
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> { GenerationLimits(computeOrder = emptyList()) }
+    }
 }

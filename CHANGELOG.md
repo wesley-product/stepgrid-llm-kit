@@ -6,6 +6,18 @@ Before 1.0, minor versions may change public API — each such change is listed 
 
 ## [Unreleased]
 
+## [0.1.1] — unreleased
+
+### Added
+- `GenerationLimits.computeOrder` — which backend each context size tries first. Default stays GPU → CPU.
+  An 8GB-class Exynos phone (GPU memory is system RAM) was killed by the system while the GPU engine
+  for Gemma 4 E4B was being built at 4096 tokens; such devices want CPU first.
+- `GenerationLimits.cpuThreads` — threads for the CPU backend (`null` = runtime default).
+- `GenerationLimits.uncappedFallback` — `false` drops the "no cap" rungs, which may reserve the model's
+  full window on a device that has no room for it. Equal roomy/max sizes are now tried once.
+- `GenerationLimits.speculativeDecoding` — sets the runtime's speculative decoding before each build
+  (`null` = leave the runtime default).
+
 ## [0.1.0] — 2026-09-14
 
 First release. Everything here was extracted from a shipping Android app that runs Gemma on-device

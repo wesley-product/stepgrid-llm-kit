@@ -22,6 +22,9 @@ public data class EngineAttempt(
  *
  *     GPU + roomy → CPU + roomy → GPU + max → CPU + max → GPU (no cap) → CPU (no cap)
  *
+ * [GenerationLimits.computeOrder] sets which backend goes first at each size, equal sizes are tried
+ * once, and [GenerationLimits.uncappedFallback] = false drops the "no cap" rungs.
+ *
  * A blank [cacheDir] is treated as absent.
  */
 public fun engineLadder(
@@ -30,12 +33,7 @@ public fun engineLadder(
     limits: GenerationLimits = GenerationLimits(),
 ): List<EngineAttempt> {
     val cache = cacheDir?.takeIf { it.isNotBlank() }
-    return listOf(
-        EngineAttempt(modelPath, Compute.GPU, limits.roomyContextTokens, cache),
-        EngineAttempt(modelPath, Compute.CPU, limits.roomyContextTokens, cache),
-        EngineAttempt(modelPath, Compute.GPU, limits.maxContextTokens, cache),
-        EngineAttempt(modelPath, Compute.CPU, limits.maxContextTokens, cache),
-        EngineAttempt(modelPath, Compute.GPU, null, cache),
-        EngineAttempt(modelPath, Compute.CPU, null, cache),
-    )
+    val sizes = listOf<Int?>(limits.roomyContextTokens, limits.maxContextTokens).distinct() +
+        (if (limits.uncappedFallback) listOf(null) else emptyList())
+    return sizes.flatMap { size -> limits.computeOrder.map { EngineAttempt(modelPath, it, size, cache) } }
 }

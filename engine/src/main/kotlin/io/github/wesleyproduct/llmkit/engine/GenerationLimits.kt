@@ -36,6 +36,15 @@ public data class Sampling(
  * @property streamMode Whether streamed chunks are deltas or cumulative snapshots. The default
  *   matches LiteRT-LM 0.13.x; change it only if your runtime differs. See [StreamMode] for why
  *   this is stated rather than detected.
+ * @property computeOrder Which backend each context size tries first. GPU first is fastest, but on
+ *   phones whose GPU shares system RAM (8GB-class Exynos/Mali) the GPU build's initialization peak
+ *   can push the system into killing apps — those devices want CPU first.
+ * @property cpuThreads Threads for the CPU backend, or `null` for the runtime's default.
+ * @property uncappedFallback Whether the ladder ends with rungs that leave the context to the
+ *   runtime. The runtime may then reserve the model's full window (tens of thousands of tokens) —
+ *   a last resort that a memory-tight device should not take.
+ * @property speculativeDecoding Set the runtime's speculative decoding on or off before each build,
+ *   or `null` to leave its default. Off saves the drafter's memory; short outputs gain little from it.
  */
 public data class GenerationLimits(
     val maxContextTokens: Int = 2048,
@@ -45,8 +54,16 @@ public data class GenerationLimits(
     val stopGraceMillis: Long = 5_000,
     val sampling: Sampling = Sampling(),
     val streamMode: StreamMode = StreamMode.DELTA,
+    val computeOrder: List<Compute> = listOf(Compute.GPU, Compute.CPU),
+    val cpuThreads: Int? = null,
+    val uncappedFallback: Boolean = true,
+    val speculativeDecoding: Boolean? = null,
 ) {
     init {
+        require(computeOrder.isNotEmpty() && computeOrder.distinct().size == computeOrder.size) {
+            "computeOrder must list each backend at most once, was " + computeOrder
+        }
+        require(cpuThreads == null || cpuThreads > 0) { "cpuThreads must be positive, was " + cpuThreads }
         // Zero would abandon the engine on every cap hit; negative means nothing to withTimeoutOrNull.
         require(stopGraceMillis > 0) { "stopGraceMillis must be positive, was " + stopGraceMillis }
     }

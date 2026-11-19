@@ -7,6 +7,8 @@ import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
@@ -691,6 +693,7 @@ public class LlmEngine(
      * JVM [Error]s such as [OutOfMemoryError] are not caught at all — after one of those, another
      * multi-GB allocation attempt is the wrong move.
      */
+    @OptIn(ExperimentalApi::class)
     private fun createEngine(modelId: String, modelPath: String): Engine {
         val ladder = engineLadder(modelPath, cacheDir, limits)
         val before = memoryProbe?.invoke()
@@ -698,6 +701,8 @@ public class LlmEngine(
         var last: Exception? = null
         for ((i, attempt) in ladder.withIndex()) {
             try {
+                // A process-wide runtime flag, read when the engine is built.
+                limits.speculativeDecoding?.let { ExperimentalFlags.enableSpeculativeDecoding = it }
                 val built = Engine(attempt.toRuntime()).also { it.initialize() }
                 info = EngineInfo(
                     modelId = modelId,
@@ -737,6 +742,8 @@ public class LlmEngine(
             EngineConfig(modelPath = modelPath, backend = Backend.GPU(), maxNumTokens = maxTokens, cacheDir = cacheDir)
         compute == Compute.GPU ->
             EngineConfig(modelPath = modelPath, backend = Backend.GPU(), cacheDir = cacheDir)
+        limits.cpuThreads != null ->
+            EngineConfig(modelPath = modelPath, backend = Backend.CPU(limits.cpuThreads), maxNumTokens = maxTokens, cacheDir = cacheDir)
         maxTokens != null ->
             EngineConfig(modelPath = modelPath, maxNumTokens = maxTokens, cacheDir = cacheDir)
         else ->
