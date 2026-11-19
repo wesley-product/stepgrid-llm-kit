@@ -6,6 +6,12 @@ Before 1.0, minor versions may change public API — each such change is listed 
 
 ## [Unreleased]
 
+## [0.1.2] — unreleased
+
+### Changed
+- LiteRT-LM 0.13.1 → 0.19.1 (current .litertlm files — Qwen3.5, LFM2, newer Gemma exports — need 0.19+). Kotlin 2.2.10 → 2.4.0,
+  because the 0.19 runtime ships Kotlin 2.4 metadata: consumers need a Kotlin 2.4 compiler.
+
 ## [0.1.1] — unreleased
 
 ### Added
