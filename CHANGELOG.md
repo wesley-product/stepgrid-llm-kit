@@ -6,13 +6,18 @@ Before 1.0, minor versions may change public API — each such change is listed 
 
 ## [Unreleased]
 
-## [0.1.2] — unreleased
+## [0.1.2] — 2026-11-20
+
+Verified on a Galaxy S26 FE (8GB, Android 17) with Gemma 4 E2B on GPU at a 2048-token context, through a
+shipping app: 4 of 4 one-shot requests returned well-formed JSON, each building the engine from cold, in
+5.0–7.7 s end to end (14.8 s on 0.13.1 for the same device and model). App PSS peaked at 2.26 GB; available
+memory never fell below 2.07 GB. Chunks are still deltas on 0.19.1, so `StreamMode.DELTA` stays the default.
 
 ### Changed
 - LiteRT-LM 0.13.1 → 0.19.1 (current .litertlm files — Qwen3.5, LFM2, newer Gemma exports — need 0.19+). Kotlin 2.2.10 → 2.4.0,
   because the 0.19 runtime ships Kotlin 2.4 metadata: consumers need a Kotlin 2.4 compiler.
 
-## [0.1.1] — unreleased
+## [0.1.1] — not published separately; ships in 0.1.2
 
 ### Added
 - `GenerationLimits.computeOrder` — which backend each context size tries first. Default stays GPU → CPU.
@@ -98,5 +103,6 @@ nonsense, and it did not.
   download may be appended to (206) or must restart (200 — the server ignored `Range`), and restores
   the true total so progress does not jump back to 0%. Pure JVM, no Android dependency.
 
-[Unreleased]: https://github.com/wesley-product/stepgrid-llm-kit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wesley-product/stepgrid-llm-kit/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/wesley-product/stepgrid-llm-kit/releases/tag/v0.1.2
 [0.1.0]: https://github.com/wesley-product/stepgrid-llm-kit/releases/tag/v0.1.0

@@ -34,7 +34,7 @@ public data class Sampling(
  *   the engine is abandoned and quarantined rather than freed, because a native callback may
  *   still be running inside it. Must be positive.
  * @property streamMode Whether streamed chunks are deltas or cumulative snapshots. The default
- *   matches LiteRT-LM 0.13.x; change it only if your runtime differs. See [StreamMode] for why
+ *   matches LiteRT-LM 0.13.x and 0.19.x; change it only if your runtime differs. See [StreamMode] for why
  *   this is stated rather than detected.
  * @property computeOrder Which backend each context size tries first. GPU first is fastest, but on
  *   phones whose GPU shares system RAM (8GB-class Exynos/Mali) the GPU build's initialization peak

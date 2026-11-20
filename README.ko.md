@@ -19,7 +19,7 @@
 
 ```kotlin
 dependencies {
-    implementation("io.github.wesley-product:llm-kit:0.1.0")   // 셋 전부
+    implementation("io.github.wesley-product:llm-kit:0.1.2")   // 셋 전부
 }
 ```
 
@@ -220,7 +220,7 @@ LlmEngine(..., limits = GenerationLimits(
 `streamMode` 만은 추측하면 안 됩니다. 조각은 **델타**로 오거나 **누적 스냅샷**으로 오는데,
 **글자만 봐서는 구분할 수 없습니다** — 모델이 같은 토큰을 되풀이하면 같은 조각이 두 번 오고,
 그건 앞의 것을 그대로 담은 스냅샷과 똑같이 생겼습니다. 기본값(`StreamMode.DELTA`)은 LiteRT-LM
-0.13.x 의 동작이고, 다른 런타임이면 명시해야 합니다. 안 그러면 되풀이된 글자가 조용히 사라집니다.
+0.13.x·0.19.x 의 동작이고, 다른 런타임이면 명시해야 합니다. 안 그러면 되풀이된 글자가 조용히 사라집니다.
 
 ## `resume` — 이어받기 판단
 

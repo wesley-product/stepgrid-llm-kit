@@ -8,7 +8,7 @@ package io.github.wesleyproduct.llmkit.engine
  * before. Guessing drops the repetition silently, so the mode is stated rather than inferred.
  */
 public enum class StreamMode {
-    /** Each chunk is only the new text. This is what LiteRT-LM 0.13.x does — its callback hands
+    /** Each chunk is only the new text. This is what LiteRT-LM 0.13.x and 0.19.x do — the callback hands
      *  every JNI message straight to the collector and keeps no buffer of its own. */
     DELTA,
 

@@ -20,7 +20,7 @@ read Android or call the native runtime need a device.
 
 ```kotlin
 dependencies {
-    implementation("io.github.wesley-product:llm-kit:0.1.0")   // all three modules
+    implementation("io.github.wesley-product:llm-kit:0.1.2")   // all three modules
 }
 ```
 
@@ -224,7 +224,7 @@ reason each value was chosen; if you run a different model, expect to change the
 `streamMode` is the one setting you should not guess at. Chunks arrive either as deltas or as
 cumulative snapshots, and **no amount of inspecting the text can tell them apart** — a model that
 repeats a token sends the same chunk twice, which looks exactly like a snapshot of what came
-before. The default (`StreamMode.DELTA`) is what LiteRT-LM 0.13.x does; set it explicitly if your
+before. The default (`StreamMode.DELTA`) is what LiteRT-LM 0.13.x and 0.19.x do; set it explicitly if your
 runtime differs, or you will silently lose repeated text.
 
 ## `device-tier`
